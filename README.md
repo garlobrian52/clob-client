@@ -55,6 +55,18 @@ The client supports three authentication levels:
 - **L2:** a signer plus `ApiKeyCreds`. Required for private CLOB operations such as posting orders, RFQs, open orders, readonly keys, and heartbeats.
 - **Builder:** L2 auth plus a `BuilderConfig` from `@polymarket/builder-signing-sdk`. Used for builder-authenticated order posting and builder endpoints.
 
+Generate L2 credentials with an L1-authenticated client, then reuse the returned credentials when constructing clients for private endpoints:
+
+```ts
+const l1Client = new ClobClient(host, chainId, signer);
+const creds = await l1Client.createOrDeriveApiKey();
+
+const l2Client = new ClobClient(host, chainId, signer, creds);
+const openOrders = await l2Client.getOpenOrders();
+```
+
+`createApiKey`, `deriveApiKey`, and `createOrDeriveApiKey` accept an optional nonce. Use the same nonce when you need to deterministically derive a specific API key.
+
 `signatureType` controls how orders are signed:
 
 ```ts
@@ -227,6 +239,21 @@ See `examples/createReadonlyApiKey.ts`, `examples/getReadonlyApiKeys.ts`, `examp
 
 The `examples/` directory contains runnable scripts. Most examples load `.env` from the repository root.
 
+Use `.env.example` as the starting point:
+
+| Variable | Used for |
+| - | - |
+| `PK` | Wallet private key for examples that sign requests or orders. |
+| `CHAIN_ID` | Chain ID; examples default to Amoy (`80002`) when unset. Use `137` for Polygon mainnet. |
+| `CLOB_API_URL` | REST API base URL; most examples default to `http://localhost:8080` when unset. |
+| `CLOB_API_KEY`, `CLOB_SECRET`, `CLOB_PASS_PHRASE` | L2 credentials returned by `createApiKey`, `deriveApiKey`, or `createOrDeriveApiKey`. |
+| `CLOB_READONLY_API_KEY` | Readonly key used by `getOpenOrdersWithReadonlyKey.ts`. |
+| `GEO_BLOCK_TOKEN` | Optional geo compliance token used by `geoToken.ts`. |
+| `BUILDER_API_KEY`, `BUILDER_SECRET`, `BUILDER_PASS_PHRASE` | Builder credentials used by builder-authenticated examples. |
+| `REQUESTER_*`, `QUOTER_*` | Separate RFQ users used by `rfqFullFlow.ts`. |
+| `RPC_TOKEN` | Alchemy token used by allowance examples. |
+| `WS_URL` | WebSocket base URL used by `socketConnection.ts`; defaults to `ws://localhost:8081` when unset. |
+
 | Category | Examples |
 | - | - |
 | Getting started | `createOrDeriveApiKey.ts`, `getMarkets.ts`, `order.ts`, `orders.ts` |
@@ -266,6 +293,16 @@ try {
     }
 }
 ```
+
+### Runtime Metadata
+
+Order creation fetches market metadata when it is not provided in `CreateOrderOptions`:
+
+- `tickSize` is cached per token for `tickSizeTtlMs`, which defaults to 5 minutes. Call `clearTickSizeCache(tokenID)` to refresh one token or `clearTickSizeCache()` to clear all cached tick sizes.
+- `negRisk` and fee rates are cached per token for the life of the `ClobClient` instance. Pass `negRisk` or `feeRateBps` explicitly when the caller already has current values.
+- `getOrderBook` updates the tick-size cache from the returned book when the response includes `asset_id` and `tick_size`.
+
+When a market has just changed tick size, pass the known `tickSize` into `createOrder`, `createAndPostOrder`, `createMarketOrder`, or RFQ creation to avoid using stale cached metadata.
 
 ### Development
 
