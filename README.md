@@ -240,7 +240,7 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 
 ### Error handling and retries
 
-The client returns API failures as structured values and does not log failed responses from `src/http-helpers/index.ts`. Applications should inspect the return value or opt into exceptions.
+HTTP helpers normalize Axios failures into structured return values; they do not throw or log failed API responses by default. Applications should inspect the return value before treating a response as successful, or opt into exceptions.
 
 By default, API errors are returned as `{ error: "...", status: ... }` objects. To have the client throw errors instead, pass `throwOnError: true` as the last constructor argument:
 
@@ -264,12 +264,14 @@ try {
     if (e instanceof ApiError) {
         console.log(e.message); // "No orderbook exists for the requested token id"
         console.log(e.status);  // 404
-        console.log(e.data);    // full error response object from the API
+        console.log(e.data);    // normalized error response object
     }
 }
 ```
 
-`retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a short delay for network errors, selected network error codes, and HTTP 5xx responses. GET, PUT, and DELETE helpers are not retried automatically.
+`throwOnError` checks the normalized response object returned by the client helpers. Responses with an `error` field become `ApiError`; successful responses are returned unchanged. Authentication and configuration failures, such as missing L1 or L2 credentials, still throw regular `Error` instances from the relevant client method.
+
+`retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a 30 ms delay for network errors, selected network error codes, and HTTP 5xx responses. GET, PUT, and DELETE helpers are not retried automatically.
 
 ### Development
 
@@ -281,11 +283,12 @@ pnpm build
 pnpm ci
 ```
 
-The package requires Node.js `>=20.10` and uses ESM with TypeScript `moduleResolution: "nodenext"`. Local source imports intentionally include `.ts` extensions; `rewriteRelativeImportExtensions` rewrites them for the emitted `dist/` package during `pnpm build`.
+The package requires Node.js `>=20.10` and uses ESM with TypeScript `moduleResolution: "nodenext"`. Local source and test imports intentionally include `.ts` extensions; `rewriteRelativeImportExtensions` rewrites relative imports for the emitted `dist/` package during `pnpm build`.
 
 When adding TypeScript files:
 
 - Use `import type` for type-only imports because `verbatimModuleSyntax` is enabled.
-- Keep runtime imports extension-qualified, matching the existing `../src/index.ts` and `./client.ts` style.
-- Put package code under `src/`; `pnpm build` compiles `src/` via `tsconfig.build.json`, while `pnpm typecheck` covers tests with `tsconfig.test.json`.
+- Keep runtime imports extension-qualified, matching the existing `../src/index.ts` and `./client.ts` style. Package consumers should continue importing from `@polymarket/clob-client`.
+- Put package code under `src/`; `pnpm build` compiles `src/` via `tsconfig.build.json`, while `pnpm typecheck` checks tests and their imported source through `tsconfig.test.json`.
+- Remember that `pnpm lint` currently checks `src/` only. Run `pnpm ci` before publishing or opening package changes.
 - Use `.env.example` as a starting point when running example scripts locally.
