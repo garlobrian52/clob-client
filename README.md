@@ -238,7 +238,9 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 | Operations | `postHeartbeat.ts`, `geoToken.ts`, `rewards.ts`, `getServerTime.ts` |
 | WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. |
 
-### Error Handling
+### Error handling and retries
+
+The client returns API failures as structured values and does not log failed responses from `src/http-helpers/index.ts`. Applications should inspect the return value or opt into exceptions.
 
 By default, API errors are returned as `{ error: "...", status: ... }` objects. To have the client throw errors instead, pass `throwOnError: true` as the last constructor argument:
 
@@ -267,6 +269,8 @@ try {
 }
 ```
 
+`retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a short delay for network errors, selected network error codes, and HTTP 5xx responses. GET, PUT, and DELETE helpers are not retried automatically.
+
 ### Development
 
 ```bash
@@ -277,4 +281,11 @@ pnpm build
 pnpm ci
 ```
 
-The package requires Node.js `>=20.10`. Use `.env.example` as a starting point when running example scripts locally.
+The package requires Node.js `>=20.10` and uses ESM with TypeScript `moduleResolution: "nodenext"`. Local source imports intentionally include `.ts` extensions; `rewriteRelativeImportExtensions` rewrites them for the emitted `dist/` package during `pnpm build`.
+
+When adding TypeScript files:
+
+- Use `import type` for type-only imports because `verbatimModuleSyntax` is enabled.
+- Keep runtime imports extension-qualified, matching the existing `../src/index.ts` and `./client.ts` style.
+- Put package code under `src/`; `pnpm build` compiles `src/` via `tsconfig.build.json`, while `pnpm typecheck` covers tests with `tsconfig.test.json`.
+- Use `.env.example` as a starting point when running example scripts locally.
