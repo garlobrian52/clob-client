@@ -278,9 +278,11 @@ try {
 }
 ```
 
-`throwOnError` checks the normalized response object returned by the client helpers. Responses with an `error` field become `ApiError`; successful responses are returned unchanged. Authentication and configuration failures, such as missing L1 or L2 credentials, still throw regular `Error` instances from the relevant client method.
+`throwOnError` checks the normalized response object returned by `ClobClient` helpers. Responses with an `error` field become `ApiError`; successful responses are returned unchanged. If the `error` value is not a string, `ApiError.message` is the JSON stringified payload and `ApiError.data` keeps the normalized response object. Authentication and configuration failures, such as missing L1 or L2 credentials, still throw regular `Error` instances from the relevant client method.
 
-`retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a 30 ms delay for network errors, selected network error codes, and HTTP 5xx responses. GET, PUT, and DELETE helpers are not retried automatically, and 4xx responses are returned immediately. If `throwOnError` is also enabled, the POST retry runs first; the final normalized failure is then converted to `ApiError`.
+`retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a 30 ms delay for network errors, HTTP 5xx responses, and Axios error codes `ECONNABORTED`, `ENETUNREACH`, `EAI_AGAIN`, or `ETIMEDOUT`. GET, PUT, and DELETE helpers are not retried automatically, and 4xx responses are returned immediately. If `throwOnError` is also enabled, the POST retry runs first; the final normalized failure is then converted to `ApiError`.
+
+Because POST retries can submit the same request body twice when the server processed the first request but the client received a transient failure, enable `retryOnError` only for flows that can tolerate a duplicate attempt or reconcile by order/request ID.
 
 ### Development
 
@@ -297,7 +299,7 @@ The package requires Node.js `>=20.10` and uses ESM with TypeScript `moduleResol
 When adding TypeScript files:
 
 - Use `import type` for type-only imports because `verbatimModuleSyntax` is enabled.
-- Keep runtime imports extension-qualified, matching the existing `../src/index.ts` and `./client.ts` style. Package consumers should continue importing from `@polymarket/clob-client`.
+- Keep runtime imports extension-qualified, matching the existing `../src/index.ts` and `./client.ts` style. Do not rewrite source imports to `.js`; `rewriteRelativeImportExtensions` handles emitted files. Package consumers should continue importing from `@polymarket/clob-client`.
 - Put package code under `src/`; `pnpm build` compiles `src/` via `tsconfig.build.json`, while `pnpm typecheck` checks tests and their imported source through `tsconfig.test.json`.
 - Remember that `pnpm lint` currently checks `src/` only. Run `pnpm ci` before publishing or opening package changes.
 - Use `.env.example` as a starting point when running example scripts locally.
