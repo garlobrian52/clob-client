@@ -242,7 +242,16 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 
 HTTP helpers normalize Axios failures into structured return values; they do not throw or log failed API responses by default. Applications should inspect the return value before treating a response as successful, or opt into exceptions.
 
-By default, API errors are returned as `{ error: "...", status: ... }` objects. To have the client throw errors instead, pass `throwOnError: true` as the last constructor argument:
+By default, API errors are returned as objects with an `error` field:
+
+| Failure shape | Returned value |
+| - | - |
+| API response body includes `error` | The response body plus `status`, for example `{ error: "Unauthorized", status: 401 }`. |
+| API response body is a string | `{ error: body, status }`. |
+| API response body has no `error` field | `{ error: body, status }`. |
+| Network error or another Axios error without a response | `{ error: message }`; `status` is not available. |
+
+To have the client throw errors instead, pass `throwOnError: true` as the last constructor argument:
 
 ```ts
 import { ClobClient, ApiError } from "@polymarket/clob-client";
@@ -271,7 +280,7 @@ try {
 
 `throwOnError` checks the normalized response object returned by the client helpers. Responses with an `error` field become `ApiError`; successful responses are returned unchanged. Authentication and configuration failures, such as missing L1 or L2 credentials, still throw regular `Error` instances from the relevant client method.
 
-`retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a 30 ms delay for network errors, selected network error codes, and HTTP 5xx responses. GET, PUT, and DELETE helpers are not retried automatically.
+`retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a 30 ms delay for network errors, selected network error codes, and HTTP 5xx responses. GET, PUT, and DELETE helpers are not retried automatically, and 4xx responses are returned immediately. If `throwOnError` is also enabled, the POST retry runs first; the final normalized failure is then converted to `ApiError`.
 
 ### Development
 
