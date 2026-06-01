@@ -223,6 +223,68 @@ See `examples/createReadonlyApiKey.ts`, `examples/getReadonlyApiKeys.ts`, `examp
 - `postOnly` is the fourth argument to `postOrder(order, OrderType.GTC, deferExec, postOnly)` and is supported for GTC/GTD orders. See `examples/postOnlyOrder.ts`.
 - `postHeartbeat(heartbeatId)` keeps a heartbeat chain active. If heartbeats are started and one is not sent within 10 seconds, all orders are cancelled. Pass the previously returned `heartbeat_id` to continue the chain. See `examples/postHeartbeat.ts`.
 
+#### Market metadata and validation
+
+`createOrder` and `createMarketOrder` resolve market metadata before signing:
+
+- If `options.tickSize` is omitted, `getTickSize(tokenID)` fetches the market minimum and caches it for `tickSizeTtlMs` milliseconds. The default TTL is 5 minutes.
+- Explicit `tickSize` values must be equal to or larger than the market minimum. Valid values are `"0.1"`, `"0.01"`, `"0.001"`, and `"0.0001"`.
+- `negRisk` defaults to `getNegRisk(tokenID)` when omitted and controls which exchange contract the order is signed for.
+- `feeRateBps` is resolved from the market. If an order supplies a different fee rate than the market requires, order creation throws before signing.
+- Prices must fit the selected tick size range, from `tickSize` through `1 - tickSize`.
+
+Use `clearTickSizeCache(tokenID?)` after market rule changes or when a long-lived client needs to force a fresh tick-size lookup. `getOrderBook` and `getOrderBooks` also update the tick-size cache from order book responses.
+
+#### Market orders
+
+Market orders use `amount`, not `size`. For buys, `amount` is the USDC budget; for sells, `amount` is the number of shares to sell.
+
+```ts
+const resp = await clobClient.createAndPostMarketOrder(
+    {
+        tokenID,
+        amount: 100,
+        side: Side.BUY,
+        orderType: OrderType.FOK,
+    },
+    { tickSize: "0.01" },
+    OrderType.FOK,
+);
+```
+
+If `price` is omitted, the client calls `calculateMarketPrice()` using the current order book. `OrderType.FOK` is the default and requires enough liquidity to fill the full amount; `OrderType.FAK` can price against the available book and leave any unfilled amount cancelled. Keep the `orderType` on the market order and the `createAndPostMarketOrder`/`postOrder` argument aligned. Auto-pricing throws `no orderbook` or `no match` when the book is missing or too thin.
+
+See `examples/marketBuyOrder.ts` and `examples/marketSellOrder.ts`.
+
+#### Balance, allowance, and account status
+
+Balance and allowance checks require L2 auth. Use `AssetType.COLLATERAL` for USDC and `AssetType.CONDITIONAL` with `token_id` for outcome tokens. The client adds the configured `signature_type` to these requests.
+
+```ts
+import { AssetType } from "@polymarket/clob-client";
+
+const collateral = await clobClient.getBalanceAllowance({
+    asset_type: AssetType.COLLATERAL,
+});
+
+const outcome = await clobClient.getBalanceAllowance({
+    asset_type: AssetType.CONDITIONAL,
+    token_id: tokenID,
+});
+
+await clobClient.updateBalanceAllowance({
+    asset_type: AssetType.CONDITIONAL,
+    token_id: tokenID,
+});
+
+const status = await clobClient.getClosedOnlyMode();
+if (status.closed_only) {
+    // The account is restricted to closing existing positions.
+}
+```
+
+`getBalanceAllowance()` returns string `balance` and `allowance` values. `updateBalanceAllowance()` asks the API to refresh balance/allowance state for the selected asset; on-chain approvals are separate from this API sync. See `examples/approveAllowances.ts`, `examples/updateBalanceAllowance.ts`, `examples/getBalanceAllowance.ts`, and `examples/getClosedOnlyMode.ts`.
+
 ### Examples
 
 The `examples/` directory contains runnable scripts. Most examples load `.env` from the repository root.
