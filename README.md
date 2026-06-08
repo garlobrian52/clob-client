@@ -162,6 +162,22 @@ await quoter.rfq.approveRfqOrder({
 });
 ```
 
+RFQ method guide:
+
+- Requester methods: `createRfqRequest`, `getRfqRequests`, `getRfqRequesterQuotes`, `getRfqBestQuote`, `acceptRfqQuote`, and `cancelRfqRequest`.
+- Quoter methods: `createRfqQuote`, `getRfqQuoterQuotes`, `approveRfqOrder`, and `cancelRfqQuote`.
+- Shared utility: `rfqConfig` returns server RFQ configuration.
+- `acceptRfqQuote` and `approveRfqOrder` fetch quote details, create signed orders internally, and use the supplied `expiration` as the signed order expiration.
+- For complementary matches, requester and quoter orders use opposite sides. For mint/merge matches, the requester order uses the complement token and inverse price.
+
+RFQ list filters:
+
+- `getRfqRequests`, `getRfqRequesterQuotes`, and `getRfqQuoterQuotes` accept `offset`, `limit`, `state`, market, size, USDC size, price, and sort filters.
+- `offset` is a base64 cursor; the default is `MA==`. `limit` defaults to 50 and is capped at 100.
+- `state` is `active` or `inactive`. If omitted, no state filter is applied.
+- Array filters such as `requestIds`, `quoteIds`, and `markets` are sent as repeated query parameters. Market filters must be condition IDs formatted as `0x` plus 64 hex characters.
+- Request sorting supports `price`, `expiry`, `size`, or `created`; quote sorting supports `price`, `expiry`, or `created`.
+
 RFQ troubleshooting checks:
 
 - Use a token ID from the same environment as `CLOB_API_URL`.
@@ -214,14 +230,68 @@ await clobClient.validateReadonlyApiKey(address, readonlyKey.apiKey);
 await clobClient.deleteReadonlyApiKey(readonlyKey.apiKey);
 ```
 
+Readonly keys are not trading credentials. To use one for private read endpoints, make a direct HTTP request with `POLY_READONLY_API_KEY` and `POLY_ADDRESS`:
+
+```ts
+import axios from "axios";
+
+await axios.get(`${host}/data/orders`, {
+    headers: {
+        POLY_READONLY_API_KEY: readonlyApiKey,
+        POLY_ADDRESS: address,
+    },
+    params: { maker_address: address },
+});
+```
+
 See `examples/createReadonlyApiKey.ts`, `examples/getReadonlyApiKeys.ts`, `examples/deleteReadonlyApiKey.ts`, and `examples/getOpenOrdersWithReadonlyKey.ts`.
+
+### Balances and allowances
+
+Use balance and allowance helpers before trading to confirm the wallet has enough USDC or conditional token approval. These endpoints require L2 auth and automatically include the client's `signature_type`.
+
+```ts
+import { AssetType } from "@polymarket/clob-client";
+
+const usdc = await clobClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+
+const outcome = await clobClient.getBalanceAllowance({
+    asset_type: AssetType.CONDITIONAL,
+    token_id: tokenID,
+});
+
+await clobClient.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+await clobClient.updateBalanceAllowance({
+    asset_type: AssetType.CONDITIONAL,
+    token_id: tokenID,
+});
+```
+
+`AssetType.CONDITIONAL` requires `token_id`. See `examples/getBalanceAllowance.ts` and `examples/updateBalanceAllowance.ts`.
 
 ### Orders and operations
 
 - Use `createAndPostOrder` or `createOrder` plus `postOrder` for limit orders.
-- Use `createAndPostMarketOrder` or `createMarketOrder` plus `postOrder` for market-style FOK/FAK orders.
+- Use `createAndPostMarketOrder` or `createMarketOrder` plus `postOrder` for market-style FOK/FAK orders. For market buys, `amount` is the USDC amount to spend; for market sells, `amount` is the share amount to sell.
+- Use `postOrders([{ order, orderType, postOnly }], deferExec, defaultPostOnly)` to submit a batch. Per-order `postOnly` overrides `defaultPostOnly`.
 - `postOnly` is the fourth argument to `postOrder(order, OrderType.GTC, deferExec, postOnly)` and is supported for GTC/GTD orders. See `examples/postOnlyOrder.ts`.
 - `postHeartbeat(heartbeatId)` keeps a heartbeat chain active. If heartbeats are started and one is not sent within 10 seconds, all orders are cancelled. Pass the previously returned `heartbeat_id` to continue the chain. See `examples/postHeartbeat.ts`.
+
+### Market data and private reads
+
+- Public market data helpers such as `getOrderBook`, `getOrderBooks`, `getPrice`, `getPrices`, `getMidpoint`, `getMidpoints`, `getSpread`, and `getSpreads` do not require L2 credentials.
+- `getTrades` and `getOpenOrders` require L2 auth and auto-page by default until the API returns the end cursor. Pass `only_first_page = true` to fetch only one page.
+- `getTradesPaginated(params, next_cursor)` returns one page as `{ trades, next_cursor, limit, count }`.
+- Pagination starts at cursor `MA==` and ends at cursor `LTE=`.
+- `getOpenOrders` uses builder headers when the client has builder auth available.
+
+### Tick size cache
+
+`createOrder`, market-order helpers, and RFQ order creation resolve a market's tick size before rounding prices and sizes. Valid tick sizes are `"0.1"`, `"0.01"`, `"0.001"`, and `"0.0001"`.
+
+- The client caches tick sizes for 5 minutes by default; set constructor argument `tickSizeTtlMs` to change the TTL.
+- Passing `options.tickSize` skips using a smaller value than the market minimum; smaller tick sizes throw `invalid tick size`.
+- Call `clearTickSizeCache(tokenID)` to refresh one token or `clearTickSizeCache()` to clear all cached tick sizes.
 
 ### Examples
 
