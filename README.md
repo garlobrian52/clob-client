@@ -277,13 +277,67 @@ await clobClient.updateBalanceAllowance({
 - `postOnly` is the fourth argument to `postOrder(order, OrderType.GTC, deferExec, postOnly)` and is supported for GTC/GTD orders. See `examples/postOnlyOrder.ts`.
 - `postHeartbeat(heartbeatId)` keeps a heartbeat chain active. If heartbeats are started and one is not sent within 10 seconds, all orders are cancelled. Pass the previously returned `heartbeat_id` to continue the chain. See `examples/postHeartbeat.ts`.
 
+Order management helpers require L2 auth:
+
+```ts
+await clobClient.cancelOrder({ orderID });
+await clobClient.cancelOrders([orderID1, orderID2]);
+await clobClient.cancelMarketOrders({ market: conditionID });
+await clobClient.cancelAll();
+
+const single = await clobClient.isOrderScoring({ order_id: orderID });
+const batch = await clobClient.areOrdersScoring({ orderIds: [orderID1, orderID2] });
+```
+
+`cancelMarketOrders` accepts `market` and/or `asset_id` filters. `cancelAll` has no filters and cancels all cancellable open orders for the authenticated user.
+
 ### Market data and private reads
 
+- Market list helpers `getMarkets`, `getSimplifiedMarkets`, `getSamplingMarkets`, and `getSamplingSimplifiedMarkets` return one `PaginationPayload` page for the supplied `next_cursor`.
 - Public market data helpers such as `getOrderBook`, `getOrderBooks`, `getPrice`, `getPrices`, `getMidpoint`, `getMidpoints`, `getSpread`, and `getSpreads` do not require L2 credentials.
+- Historical and activity helpers `getPricesHistory({ market, startTs, endTs, interval, fidelity })` and `getMarketTradesEvents(conditionID)` are public reads. See `examples/getPricesHistory.ts` and `examples/getMarketTradesEvents.ts`.
 - `getTrades` and `getOpenOrders` require L2 auth and auto-page by default until the API returns the end cursor. Pass `only_first_page = true` to fetch only one page.
 - `getTradesPaginated(params, next_cursor)` returns one page as `{ trades, next_cursor, limit, count }`.
 - Pagination starts at cursor `MA==` and ends at cursor `LTE=`.
 - `getOpenOrders` uses builder headers when the client has builder auth available.
+
+```ts
+import { PriceHistoryInterval } from "@polymarket/clob-client";
+
+const history = await clobClient.getPricesHistory({
+    market: tokenID,
+    interval: PriceHistoryInterval.ONE_DAY,
+    fidelity: 5,
+});
+```
+
+Notifications are private reads. `getNotifications()` automatically includes the client's `signature_type`; `dropNotifications({ ids })` removes notifications by ID.
+
+```ts
+const notifications = await clobClient.getNotifications();
+await clobClient.dropNotifications({ ids: ["notification-id"] });
+```
+
+### Rewards
+
+Rewards helpers cover both public market reward configuration and authenticated user earnings:
+
+```ts
+const currentRewards = await clobClient.getCurrentRewards();
+const marketRewards = await clobClient.getRawRewardsForMarket(conditionID);
+
+const daily = await clobClient.getEarningsForUserForDay("2025-01-31");
+const totals = await clobClient.getTotalEarningsForUserForDay("2025-01-31");
+const percentages = await clobClient.getRewardPercentages();
+const configured = await clobClient.getUserEarningsAndMarketsConfig(
+    "2025-01-31",
+    "earnings",
+    "DESC",
+    true,
+);
+```
+
+`getCurrentRewards` and `getRawRewardsForMarket` are public. User earnings, reward percentages, and earnings-with-market-config methods require L2 auth and include the client's `signature_type`. Reward dates are UTC date strings in `YYYY-MM-DD` format. See `examples/rewards.ts`.
 
 ### Tick size cache
 
@@ -305,7 +359,9 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 | RFQ | `rfqFullFlow.ts` and the `rfq*.ts` scripts |
 | Builder | `createBuilderApiKey.ts`, `getBuilderApiKeys.ts`, `revokeBuilderApiKeys.ts`, `getBuilderTrades.ts`, `getBuilderOpenOrders.ts` |
 | Readonly keys | `createReadonlyApiKey.ts`, `getReadonlyApiKeys.ts`, `deleteReadonlyApiKey.ts`, `getOpenOrdersWithReadonlyKey.ts` |
-| Operations | `postHeartbeat.ts`, `geoToken.ts`, `rewards.ts`, `getServerTime.ts` |
+| Operations | `postHeartbeat.ts`, `geoToken.ts`, `getServerTime.ts`, `cancelOrder.ts`, `cancelOrders.ts`, `cancelMarketOrders.ts`, `cancelAll.ts` |
+| Notifications and scoring | `getNofications.ts`, `dropNofications.ts`, `isOrderScoring.ts`, `areOrdersScoring.ts` |
+| Rewards and analytics | `rewards.ts`, `getPricesHistory.ts`, `getMarketTradesEvents.ts`, `getLastTradePrice.ts`, `getLastTradesPrices.ts` |
 | WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. |
 
 ### Error handling and retries
