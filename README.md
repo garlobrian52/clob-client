@@ -287,20 +287,46 @@ await clobClient.updateBalanceAllowance({
 
 - Use `createAndPostOrder` or `createOrder` plus `postOrder` for limit orders.
 - Use `createAndPostMarketOrder` or `createMarketOrder` plus `postOrder` for market-style FOK/FAK orders. For market buys, `amount` is the USDC amount to spend; for market sells, `amount` is the share amount to sell.
-- Use `postOrders([{ order, orderType, postOnly }], deferExec, defaultPostOnly)` to submit a batch. Per-order `postOnly` overrides `defaultPostOnly`.
+- Use `postOrders([{ order, orderType, postOnly }], deferExec, defaultPostOnly)` to submit a batch. Per-order `postOnly` overrides `defaultPostOnly`; the same `deferExec` value is applied to every order in the payload.
 - `postOnly` is the fourth argument to `postOrder(order, OrderType.GTC, deferExec, postOnly)` and is supported for GTC/GTD orders. See `examples/postOnlyOrder.ts`.
-- `postHeartbeat(heartbeatId)` keeps a heartbeat chain active. If heartbeats are started and one is not sent within 10 seconds, all orders are cancelled. Pass the previously returned `heartbeat_id` to continue the chain. See `examples/postHeartbeat.ts`.
+- `postOrder` and `postOrders` use builder headers automatically when the client has builder auth available.
+- `postHeartbeat(heartbeatId)` keeps a heartbeat chain active. If heartbeats are started and one is not sent within 10 seconds, all orders are cancelled. Pass the previously returned `heartbeat_id` to continue the chain; omit the argument or pass `null` to start a new chain.
+
+```ts
+let heartbeatId: string | null = null;
+
+const resp = await clobClient.postHeartbeat(heartbeatId);
+heartbeatId = resp.heartbeat_id;
+```
+
+Run heartbeat loops with a cadence below the 10 second cancellation window; `examples/postHeartbeat.ts` uses 5 seconds.
 
 ### Market data and private reads
 
 - Public market discovery helpers such as `getMarkets`, `getSimplifiedMarkets`, `getSamplingMarkets`, `getSamplingSimplifiedMarkets`, and `getMarket(conditionID)` do not require L2 credentials. The list helpers accept a `next_cursor` argument and default to the initial cursor.
 - Public market data helpers such as `getOrderBook`, `getOrderBooks`, `getPrice`, `getPrices`, `getMidpoint`, `getMidpoints`, `getSpread`, `getSpreads`, `getLastTradePrice`, and `getLastTradesPrices` do not require L2 credentials.
-- `getPricesHistory({ market, startTs, endTs, fidelity, interval })` returns price points as `{ t, p }`. `PriceHistoryInterval` supports `max`, `1w`, `1d`, `6h`, and `1h`.
+- `getPricesHistory({ market, startTs, endTs, fidelity, interval })` is also public and returns price points as `{ t, p }`. `market` is the token ID, timestamps are Unix seconds, and `PriceHistoryInterval` supports `max`, `1w`, `1d`, `6h`, and `1h`.
 - `getMarketTradesEvents(conditionID)` returns live activity events for a condition ID.
 - `getTrades` and `getOpenOrders` require L2 auth and auto-page by default until the API returns the end cursor. Pass `only_first_page = true` to fetch only one page.
 - `getTradesPaginated(params, next_cursor)` returns one page as `{ trades, next_cursor, limit, count }`.
 - Pagination starts at cursor `MA==` and ends at cursor `LTE=`.
 - `getOpenOrders` uses builder headers when the client has builder auth available.
+
+```ts
+const firstPage = await clobClient.getTradesPaginated({
+    market: conditionID,
+    maker_address: makerAddress,
+});
+
+if (firstPage.next_cursor !== "LTE=") {
+    await clobClient.getTradesPaginated(
+        { market: conditionID },
+        firstPage.next_cursor,
+    );
+}
+```
+
+Trade filters include `id`, `maker_address`, `market`, `asset_id`, `before`, and `after`; open-order filters include `id`, `market`, and `asset_id`.
 
 ### Notifications and order operations
 
@@ -318,6 +344,17 @@ Scoring and cleanup helpers also require L2 auth:
 - `cancelMarketOrders({ market })` cancels orders for a condition ID.
 - `cancelMarketOrders({ asset_id })` cancels orders for a token ID.
 
+```ts
+const single = await clobClient.isOrderScoring({ order_id: orderID });
+const many = await clobClient.areOrdersScoring({ orderIds: [orderID] });
+
+if (!single.scoring && many[orderID] === false) {
+    await clobClient.cancelMarketOrders({ market: conditionID });
+}
+```
+
+Use `cancelMarketOrders` for scoped cleanup by condition ID or token ID. Use `cancelOrder`, `cancelOrders`, or `cancelAll` when the operational action is tied to explicit order IDs or all open orders.
+
 See `examples/getNofications.ts`, `examples/dropNofications.ts`, `examples/isOrderScoring.ts`, `examples/areOrdersScoring.ts`, and `examples/cancelMarketOrders.ts`.
 
 ### Rewards helpers
@@ -332,7 +369,36 @@ const currentMarkets = await clobClient.getCurrentRewards();
 const marketRewards = await clobClient.getRawRewardsForMarket(conditionID);
 ```
 
-Account-specific rewards methods require L2 auth and include the client's signature type. `getEarningsForUserForDay` and `getUserEarningsAndMarketsConfig` auto-page until the end cursor. Public rewards market helpers, including `getCurrentRewards` and `getRawRewardsForMarket`, do not require L2 credentials.
+Account-specific rewards methods require L2 auth and include the client's signature type:
+
+- `getEarningsForUserForDay(date)` auto-pages per-market user earnings.
+- `getTotalEarningsForUserForDay(date)` returns account totals for the date.
+- `getUserEarningsAndMarketsConfig(date, order_by, position, no_competition)` auto-pages earnings plus rewards market configuration.
+- `getRewardPercentages()` returns liquidity reward percentages keyed by market.
+
+Dates are passed through to the API as strings; examples use UTC `YYYY-MM-DD` values. Public rewards market helpers, including `getCurrentRewards` and `getRawRewardsForMarket(conditionID)`, do not require L2 credentials and auto-page until the end cursor.
+
+### Operational helper runbook
+
+Use this checklist when wiring scripts that read private state, keep active orders alive, or clean up account state. Private helpers require a `signer` and L2 `creds`; public market and reward-configuration reads can use an unauthenticated client.
+
+| Goal | Helpers | Auth | Key constraints |
+| - | - | - | - |
+| Keep orders protected by heartbeat | `postHeartbeat(heartbeatId)` | L2 | Sends `POST /v1/heartbeats` with `heartbeat_id` set to the previous response value or `null`. Schedule the next heartbeat below the 10 second cancellation window. |
+| Inspect private trades | `getTrades(params, only_first_page, next_cursor)`, `getTradesPaginated(params, next_cursor)` | L2 | `getTrades` auto-pages unless `only_first_page` is true; `getTradesPaginated` returns one page plus `next_cursor`, `limit`, and `count`. |
+| Inspect open orders | `getOpenOrders(params, only_first_page, next_cursor)` | L2 | Auto-pages by default and uses builder headers when the client has a valid `builderConfig`. |
+| Clear notifications | `getNotifications()`, `dropNotifications({ ids })` | L2 | `getNotifications` includes `signature_type`; `dropNotifications` sends IDs as a comma-separated query parameter. |
+| Check rewards | `getEarningsForUserForDay`, `getTotalEarningsForUserForDay`, `getUserEarningsAndMarketsConfig`, `getRewardPercentages`, `getCurrentRewards`, `getRawRewardsForMarket` | L2 for account helpers; public for market helpers | Account helpers include `signature_type`; `getCurrentRewards` and `getRawRewardsForMarket(conditionID)` auto-page public reward market data. |
+| Check scoring before cleanup | `isOrderScoring({ order_id })`, `areOrdersScoring({ orderIds })` | L2 | Single-order scoring uses `order_id`; batch scoring signs and posts the order ID array. |
+| Cancel active orders | `cancelOrder({ orderID })`, `cancelOrders(orderIDs)`, `cancelMarketOrders({ market })`, `cancelMarketOrders({ asset_id })`, `cancelAll()` | L2 | Prefer the narrowest helper: one hash, known hashes, one condition ID, one token ID, then global account cleanup. |
+
+Troubleshooting checks:
+
+- For private helper failures, verify the client was constructed with `signer`, L2 `creds`, the correct `signatureType`, and the `funderAddress` that owns the funds or proxy account.
+- For empty paginated reads, confirm that filters match the environment: `market` is a condition ID, while `asset_id` and `getPricesHistory({ market })` use token IDs.
+- For heartbeat cancellations, persist the returned `heartbeat_id` between loop iterations and send the next heartbeat before the 10 second window closes.
+- For cleanup scripts, prefer the narrowest helper that matches the runbook: `cancelOrder` for one hash, `cancelOrders` for known hashes, `cancelMarketOrders` for one market or token, and `cancelAll` only for global account cleanup.
+- For rewards checks, use L2 credentials for account-specific earnings and an unauthenticated client only for public rewards market configuration.
 
 ### Tick size cache
 
