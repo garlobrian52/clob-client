@@ -378,7 +378,21 @@ Account-specific rewards methods require L2 auth and include the client's signat
 
 Dates are passed through to the API as strings; examples use UTC `YYYY-MM-DD` values. Public rewards market helpers, including `getCurrentRewards` and `getRawRewardsForMarket(conditionID)`, do not require L2 credentials and auto-page until the end cursor.
 
-### Operational troubleshooting
+### Operational helper runbook
+
+Use this checklist when wiring scripts that read private state, keep active orders alive, or clean up account state. Private helpers require a `signer` and L2 `creds`; public market and reward-configuration reads can use an unauthenticated client.
+
+| Goal | Helpers | Auth | Key constraints |
+| - | - | - | - |
+| Keep orders protected by heartbeat | `postHeartbeat(heartbeatId)` | L2 | Sends `POST /v1/heartbeats` with `heartbeat_id` set to the previous response value or `null`. Schedule the next heartbeat below the 10 second cancellation window. |
+| Inspect private trades | `getTrades(params, only_first_page, next_cursor)`, `getTradesPaginated(params, next_cursor)` | L2 | `getTrades` auto-pages unless `only_first_page` is true; `getTradesPaginated` returns one page plus `next_cursor`, `limit`, and `count`. |
+| Inspect open orders | `getOpenOrders(params, only_first_page, next_cursor)` | L2 | Auto-pages by default and uses builder headers when the client has a valid `builderConfig`. |
+| Clear notifications | `getNotifications()`, `dropNotifications({ ids })` | L2 | `getNotifications` includes `signature_type`; `dropNotifications` sends IDs as a comma-separated query parameter. |
+| Check rewards | `getEarningsForUserForDay`, `getTotalEarningsForUserForDay`, `getUserEarningsAndMarketsConfig`, `getRewardPercentages`, `getCurrentRewards`, `getRawRewardsForMarket` | L2 for account helpers; public for market helpers | Account helpers include `signature_type`; `getCurrentRewards` and `getRawRewardsForMarket(conditionID)` auto-page public reward market data. |
+| Check scoring before cleanup | `isOrderScoring({ order_id })`, `areOrdersScoring({ orderIds })` | L2 | Single-order scoring uses `order_id`; batch scoring signs and posts the order ID array. |
+| Cancel active orders | `cancelOrder({ orderID })`, `cancelOrders(orderIDs)`, `cancelMarketOrders({ market })`, `cancelMarketOrders({ asset_id })`, `cancelAll()` | L2 | Prefer the narrowest helper: one hash, known hashes, one condition ID, one token ID, then global account cleanup. |
+
+Troubleshooting checks:
 
 - For private helper failures, verify the client was constructed with `signer`, L2 `creds`, the correct `signatureType`, and the `funderAddress` that owns the funds or proxy account.
 - For empty paginated reads, confirm that filters match the environment: `market` is a condition ID, while `asset_id` and `getPricesHistory({ market })` use token IDs.
