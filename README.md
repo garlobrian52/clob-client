@@ -67,6 +67,20 @@ SignatureType.POLY_GNOSIS_SAFE; // 2: Polymarket Gnosis Safe
 
 Pass `funderAddress` when the signing wallet differs from the Polymarket profile or proxy address that holds funds. See `examples/signatureTypes.ts` for end-to-end signature type examples.
 
+### API key lifecycle
+
+Use `createOrDeriveApiKey` for normal setup so repeated runs reuse an existing L2 key when one is already available. `createApiKey` and `deriveApiKey` require L1 auth; listing and deleting keys require L2 auth.
+
+```ts
+const creds = await new ClobClient(host, 137, signer).createOrDeriveApiKey();
+const authedClient = new ClobClient(host, 137, signer, creds);
+
+const keys = await authedClient.getApiKeys();
+await authedClient.deleteApiKey();
+```
+
+`deleteApiKey` deletes the L2 key used by the current client. After deleting a key, create or derive credentials again before calling private endpoints. Use `getClosedOnlyMode()` to check whether an authenticated account is limited to closing positions.
+
 ### Using viem WalletClient
 
 ```ts
@@ -279,11 +293,46 @@ await clobClient.updateBalanceAllowance({
 
 ### Market data and private reads
 
-- Public market data helpers such as `getOrderBook`, `getOrderBooks`, `getPrice`, `getPrices`, `getMidpoint`, `getMidpoints`, `getSpread`, and `getSpreads` do not require L2 credentials.
+- Public market discovery helpers such as `getMarkets`, `getSimplifiedMarkets`, `getSamplingMarkets`, `getSamplingSimplifiedMarkets`, and `getMarket(conditionID)` do not require L2 credentials. The list helpers accept a `next_cursor` argument and default to the initial cursor.
+- Public market data helpers such as `getOrderBook`, `getOrderBooks`, `getPrice`, `getPrices`, `getMidpoint`, `getMidpoints`, `getSpread`, `getSpreads`, `getLastTradePrice`, and `getLastTradesPrices` do not require L2 credentials.
+- `getPricesHistory({ market, startTs, endTs, fidelity, interval })` returns price points as `{ t, p }`. `PriceHistoryInterval` supports `max`, `1w`, `1d`, `6h`, and `1h`.
+- `getMarketTradesEvents(conditionID)` returns live activity events for a condition ID.
 - `getTrades` and `getOpenOrders` require L2 auth and auto-page by default until the API returns the end cursor. Pass `only_first_page = true` to fetch only one page.
 - `getTradesPaginated(params, next_cursor)` returns one page as `{ trades, next_cursor, limit, count }`.
 - Pagination starts at cursor `MA==` and ends at cursor `LTE=`.
 - `getOpenOrders` uses builder headers when the client has builder auth available.
+
+### Notifications and order operations
+
+Notification helpers require L2 auth. `getNotifications()` includes the client's signature type in the request. `dropNotifications({ ids })` clears one or more notifications; IDs are sent as a comma-separated query parameter.
+
+```ts
+const notifications = await clobClient.getNotifications();
+await clobClient.dropNotifications({ ids: ["3"] });
+```
+
+Scoring and cleanup helpers also require L2 auth:
+
+- `isOrderScoring({ order_id })` checks one order.
+- `areOrdersScoring({ orderIds })` checks many order hashes and returns a map keyed by order ID.
+- `cancelMarketOrders({ market })` cancels orders for a condition ID.
+- `cancelMarketOrders({ asset_id })` cancels orders for a token ID.
+
+See `examples/getNofications.ts`, `examples/dropNofications.ts`, `examples/isOrderScoring.ts`, `examples/areOrdersScoring.ts`, and `examples/cancelMarketOrders.ts`.
+
+### Rewards helpers
+
+Rewards methods cover both account-specific earnings and public rewards configuration.
+
+```ts
+const daily = await clobClient.getEarningsForUserForDay("2024-04-09");
+const totals = await clobClient.getTotalEarningsForUserForDay("2024-04-09");
+const percentages = await clobClient.getRewardPercentages();
+const currentMarkets = await clobClient.getCurrentRewards();
+const marketRewards = await clobClient.getRawRewardsForMarket(conditionID);
+```
+
+Account-specific rewards methods require L2 auth and include the client's signature type. `getEarningsForUserForDay` and `getUserEarningsAndMarketsConfig` auto-page until the end cursor. Public rewards market helpers, including `getCurrentRewards` and `getRawRewardsForMarket`, do not require L2 credentials.
 
 ### Tick size cache
 
@@ -305,7 +354,7 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 | RFQ | `rfqFullFlow.ts` and the `rfq*.ts` scripts |
 | Builder | `createBuilderApiKey.ts`, `getBuilderApiKeys.ts`, `revokeBuilderApiKeys.ts`, `getBuilderTrades.ts`, `getBuilderOpenOrders.ts` |
 | Readonly keys | `createReadonlyApiKey.ts`, `getReadonlyApiKeys.ts`, `deleteReadonlyApiKey.ts`, `getOpenOrdersWithReadonlyKey.ts` |
-| Operations | `postHeartbeat.ts`, `geoToken.ts`, `rewards.ts`, `getServerTime.ts` |
+| Operations | `postHeartbeat.ts`, `geoToken.ts`, `rewards.ts`, `getServerTime.ts`, `getPricesHistory.ts`, `cancelMarketOrders.ts` |
 | WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. |
 
 ### Error handling and retries
