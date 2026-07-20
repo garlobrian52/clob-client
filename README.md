@@ -470,7 +470,7 @@ pnpm install
 pnpm lint
 pnpm test
 pnpm build
-pnpm ci
+pnpm run ci
 ```
 
 The package requires Node.js `>=20.10` and uses ESM with TypeScript `moduleResolution: "nodenext"`. Local source and test imports intentionally include `.ts` extensions; `rewriteRelativeImportExtensions` rewrites relative imports for the emitted `dist/` package during `pnpm build`.
@@ -480,5 +480,5 @@ When adding TypeScript files:
 - Use `import type` for type-only imports because `verbatimModuleSyntax` is enabled.
 - Keep runtime imports extension-qualified, matching the existing `../src/index.ts` and `./client.ts` style. Package consumers should continue importing from `@polymarket/clob-client`.
 - Put package code under `src/`; `pnpm build` compiles `src/` via `tsconfig.build.json`, while `pnpm typecheck` checks tests and their imported source through `tsconfig.test.json`.
-- Remember that `pnpm lint` currently checks `src/` only. Run `pnpm ci` before publishing or opening package changes.
+- Remember that `pnpm lint` currently checks `src/` only. Run `pnpm run ci` before publishing or opening package changes.
 - Use `.env.example` as a starting point when running example scripts locally.
