@@ -9,9 +9,8 @@ Typescript client for the Polymarket CLOB
 ### Usage
 
 ```ts
-// npm install @polymarket/clob-client
-// npm install ethers
-// Client initialization example and dumping API Keys
+// npm install @polymarket/clob-client @ethersproject/wallet@5
+// Client initialization with an optional ethers v5-compatible signer
 
 import { ApiKeyCreds, ClobClient, OrderType, Side, } from "@polymarket/clob-client";
 import { Wallet } from "@ethersproject/wallet";
@@ -67,6 +66,24 @@ SignatureType.POLY_GNOSIS_SAFE; // 2: Polymarket Gnosis Safe
 
 Pass `funderAddress` when the signing wallet differs from the Polymarket profile or proxy address that holds funds. See `examples/signatureTypes.ts` for end-to-end signature type examples.
 
+### Signer requirements
+
+The package exports the `ClobSigner` type and accepts either a viem `WalletClient` or an ethers v5-compatible signer. Ethers is optional and is not installed as a runtime dependency of `@polymarket/clob-client`.
+
+| Signer | Required methods and address source |
+| - | - |
+| viem `WalletClient` | Must expose `signTypedData`. The client resolves the signing address from `account.address`, then `requestAddresses()`, then `getAddresses()`. |
+| Ethers v5-compatible signer | Must expose `_signTypedData(domain, types, value)` and `getAddress()`. Install `@ethersproject/wallet@5` directly if using the `Wallet` shown above. |
+
+An ethers v6 signer does not implement the ethers v5 `_signTypedData` contract. Use a viem `WalletClient` or an ethers v5-compatible signer instead.
+
+Signer setup failures use these client-side errors:
+
+- `unsupported signer type` means neither typed-data signing interface was found.
+- `wallet client is missing account address` means a viem signer was detected, but none of the supported address sources returned an address. For JSON-RPC browser wallets, connect or request account access before constructing authenticated requests.
+
+The optional constructor `getSigner` callback refreshes the signer used to build orders. It does not replace the constructor's static `signer` for L1 or L2 authentication headers, so authenticated clients still need argument 3.
+
 ### API key lifecycle
 
 Use `createOrDeriveApiKey` for normal setup so repeated runs reuse an existing L2 key when one is already available. `createApiKey` and `deriveApiKey` require L1 auth; listing and deleting keys require L2 auth.
@@ -84,6 +101,8 @@ await authedClient.deleteApiKey();
 ### Using viem WalletClient
 
 ```ts
+// npm install @polymarket/clob-client viem
+
 import { ClobClient } from "@polymarket/clob-client";
 import { createWalletClient, http } from "viem";
 import { polygon } from "viem/chains";
@@ -108,14 +127,14 @@ const clobClient = new ClobClient(host, 137, walletClient);
 | - | - | - |
 | 1 | `host` | CLOB API base URL, for example `https://clob.polymarket.com`. |
 | 2 | `chainId` | Network chain ID. The client supports Polygon `137` and Amoy `80002`. |
-| 3 | `signer` | Ethers `Wallet` or viem `WalletClient` used for L1 signatures and order signing. |
+| 3 | `signer` | A supported `ClobSigner` used for L1 signatures, authenticated headers, and order signing. See [Signer requirements](#signer-requirements). |
 | 4 | `creds` | L2 API credentials: `{ key, secret, passphrase }`. |
 | 5 | `signatureType` | `SignatureType.EOA`, `SignatureType.POLY_PROXY`, or `SignatureType.POLY_GNOSIS_SAFE`. |
 | 6 | `funderAddress` | Profile, proxy, or Safe address that funds trades. |
 | 7 | `geoBlockToken` | Adds `geo_block_token` to client requests; see `examples/geoToken.ts`. |
 | 8 | `useServerTime` | Uses the server timestamp when building authenticated headers. |
 | 9 | `builderConfig` | Builder signing config for builder order flow and builder endpoints. |
-| 10 | `getSigner` | Lazy signer provider used by the order builder. |
+| 10 | `getSigner` | Lazy signer provider used by the order builder only; it does not replace argument 3 for authentication. |
 | 11 | `retryOnError` | Retries transient POST failures in the HTTP helper. |
 | 12 | `tickSizeTtlMs` | Tick-size cache TTL in milliseconds. Defaults to 5 minutes. |
 | 13 | `throwOnError` | Throws `ApiError` for API error responses instead of returning `{ error, status }`. |
@@ -451,7 +470,7 @@ pnpm install
 pnpm lint
 pnpm test
 pnpm build
-pnpm ci
+pnpm run ci
 ```
 
 The package requires Node.js `>=20.10` and uses ESM with TypeScript `moduleResolution: "nodenext"`. Local source and test imports intentionally include `.ts` extensions; `rewriteRelativeImportExtensions` rewrites relative imports for the emitted `dist/` package during `pnpm build`.
@@ -461,5 +480,5 @@ When adding TypeScript files:
 - Use `import type` for type-only imports because `verbatimModuleSyntax` is enabled.
 - Keep runtime imports extension-qualified, matching the existing `../src/index.ts` and `./client.ts` style. Package consumers should continue importing from `@polymarket/clob-client`.
 - Put package code under `src/`; `pnpm build` compiles `src/` via `tsconfig.build.json`, while `pnpm typecheck` checks tests and their imported source through `tsconfig.test.json`.
-- Remember that `pnpm lint` currently checks `src/` only. Run `pnpm ci` before publishing or opening package changes.
+- Remember that `pnpm lint` currently checks `src/` only. Run `pnpm run ci` before publishing or opening package changes.
 - Use `.env.example` as a starting point when running example scripts locally.
