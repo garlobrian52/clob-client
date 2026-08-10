@@ -253,8 +253,8 @@ const trades = await clobClient.getBuilderTrades();
 Builder auth scope:
 
 - `createBuilderApiKey` and `getBuilderApiKeys` require L2 auth only.
-- `revokeBuilderApiKey`, `getBuilderTrades`, and `getBuilderOpenOrders` require a valid `BuilderConfig` (`builderConfig.isValid()`). Missing builder auth throws `Builder API Credentials needed to interact with this endpoint!`; failed header generation throws `Builder key auth failed!`.
-- When builder auth is available, `postOrder`, `postOrders`, `getOpenOrders`, and `getOrder` opportunistically attach builder headers.
+- `revokeBuilderApiKey` and `getBuilderTrades` require a valid `BuilderConfig` (`builderConfig.isValid()`). Missing builder auth throws `Builder API Credentials needed to interact with this endpoint!`; failed header generation throws `Builder key auth failed!`.
+- When builder auth is available, `postOrder`, `postOrders`, `getOpenOrders`, and `getOrder` opportunistically attach builder headers. `examples/getBuilderOpenOrders.ts` is a builder-configured `getOpenOrders()` call, not a separate client method.
 
 See `examples/createBuilderApiKey.ts`, `examples/getBuilderApiKeys.ts`, `examples/revokeBuilderApiKeys.ts`, `examples/getBuilderTrades.ts`, and `examples/getBuilderOpenOrders.ts`. The revoke example file name is plural, but the client method is `revokeBuilderApiKey()`.
 
