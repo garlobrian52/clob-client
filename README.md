@@ -9,9 +9,8 @@ Typescript client for the Polymarket CLOB
 ### Usage
 
 ```ts
-// npm install @polymarket/clob-client
-// npm install ethers
-// Client initialization example and dumping API Keys
+// npm install @polymarket/clob-client @ethersproject/wallet@5
+// Client initialization with an optional ethers v5-compatible signer
 
 import { ApiKeyCreds, ClobClient, OrderType, Side, } from "@polymarket/clob-client";
 import { Wallet } from "@ethersproject/wallet";
@@ -67,9 +66,27 @@ SignatureType.POLY_GNOSIS_SAFE; // 2: Polymarket Gnosis Safe
 
 Pass `funderAddress` when the signing wallet differs from the Polymarket profile or proxy address that holds funds. See `examples/signatureTypes.ts` for end-to-end signature type examples.
 
+### Signer requirements
+
+The package exports the `ClobSigner` type and accepts either a viem `WalletClient` or an ethers v5-compatible signer. Ethers is optional and is not installed as a runtime dependency of `@polymarket/clob-client`.
+
+| Signer | Required methods and address source |
+| - | - |
+| viem `WalletClient` | Must expose `signTypedData`. The client resolves the signing address from `account.address`, then `requestAddresses()`, then `getAddresses()`. |
+| Ethers v5-compatible signer | Must expose `_signTypedData(domain, types, value)` and `getAddress()`. Install `@ethersproject/wallet@5` directly if using the `Wallet` shown above. |
+
+An ethers v6 signer does not implement the ethers v5 `_signTypedData` contract. Use a viem `WalletClient` or an ethers v5-compatible signer instead.
+
+Signer setup failures use these client-side errors:
+
+- `unsupported signer type` means neither typed-data signing interface was found.
+- `wallet client is missing account address` means a viem signer was detected, but none of the supported address sources returned an address. For JSON-RPC browser wallets, connect or request account access before constructing authenticated requests.
+
+The optional constructor `getSigner` callback refreshes the signer used to build orders. It does not replace the constructor's static `signer` for L1 or L2 authentication headers, so authenticated clients still need argument 3.
+
 ### API key lifecycle
 
-Use `createOrDeriveApiKey` for normal setup so repeated runs reuse an existing L2 key when one is already available. `createApiKey` and `deriveApiKey` require L1 auth; listing and deleting keys require L2 auth.
+Use `createOrDeriveApiKey` for normal setup so repeated runs reuse an existing L2 key when one is already available. `createApiKey` and `deriveApiKey` require L1 auth; listing and deleting keys require L2 auth. All three key-creation helpers accept an optional `nonce`; pass the same nonce when you need to deterministically derive a specific API key.
 
 ```ts
 const creds = await new ClobClient(host, 137, signer).createOrDeriveApiKey();
@@ -84,6 +101,8 @@ await authedClient.deleteApiKey();
 ### Using viem WalletClient
 
 ```ts
+// npm install @polymarket/clob-client viem
+
 import { ClobClient } from "@polymarket/clob-client";
 import { createWalletClient, http } from "viem";
 import { polygon } from "viem/chains";
@@ -108,14 +127,14 @@ const clobClient = new ClobClient(host, 137, walletClient);
 | - | - | - |
 | 1 | `host` | CLOB API base URL, for example `https://clob.polymarket.com`. |
 | 2 | `chainId` | Network chain ID. The client supports Polygon `137` and Amoy `80002`. |
-| 3 | `signer` | Ethers `Wallet` or viem `WalletClient` used for L1 signatures and order signing. |
+| 3 | `signer` | A supported `ClobSigner` used for L1 signatures, authenticated headers, and order signing. See [Signer requirements](#signer-requirements). |
 | 4 | `creds` | L2 API credentials: `{ key, secret, passphrase }`. |
 | 5 | `signatureType` | `SignatureType.EOA`, `SignatureType.POLY_PROXY`, or `SignatureType.POLY_GNOSIS_SAFE`. |
 | 6 | `funderAddress` | Profile, proxy, or Safe address that funds trades. |
-| 7 | `geoBlockToken` | Adds `geo_block_token` to client requests; see `examples/geoToken.ts`. |
-| 8 | `useServerTime` | Uses the server timestamp when building authenticated headers. |
+| 7 | `geoBlockToken` | Adds `geo_block_token` as a query parameter on every client HTTP request; see `examples/geoToken.ts`. |
+| 8 | `useServerTime` | Uses `getServerTime()` when building authenticated headers instead of the local clock. |
 | 9 | `builderConfig` | Builder signing config for builder order flow and builder endpoints. |
-| 10 | `getSigner` | Lazy signer provider used by the order builder. |
+| 10 | `getSigner` | Lazy signer provider used by the order builder only; it does not replace argument 3 for authentication. |
 | 11 | `retryOnError` | Retries transient POST failures in the HTTP helper. |
 | 12 | `tickSizeTtlMs` | Tick-size cache TTL in milliseconds. Defaults to 5 minutes. |
 | 13 | `throwOnError` | Throws `ApiError` for API error responses instead of returning `{ error, status }`. |
@@ -231,7 +250,13 @@ const clobClient = new ClobClient(
 const trades = await clobClient.getBuilderTrades();
 ```
 
-See `examples/createBuilderApiKey.ts`, `examples/getBuilderApiKeys.ts`, `examples/revokeBuilderApiKeys.ts`, `examples/getBuilderTrades.ts`, and `examples/getBuilderOpenOrders.ts`.
+Builder auth scope:
+
+- `createBuilderApiKey` and `getBuilderApiKeys` require L2 auth only.
+- `revokeBuilderApiKey` and `getBuilderTrades` require a valid `BuilderConfig` (`builderConfig.isValid()`). Missing builder auth throws `Builder API Credentials needed to interact with this endpoint!`; failed header generation throws `Builder key auth failed!`.
+- When builder auth is available, `postOrder`, `postOrders`, `getOpenOrders`, and `getOrder` opportunistically attach builder headers. `examples/getBuilderOpenOrders.ts` is a builder-configured `getOpenOrders()` call, not a separate client method.
+
+See `examples/createBuilderApiKey.ts`, `examples/getBuilderApiKeys.ts`, `examples/revokeBuilderApiKeys.ts`, `examples/getBuilderTrades.ts`, and `examples/getBuilderOpenOrders.ts`. The revoke example file name is plural, but the client method is `revokeBuilderApiKey()`.
 
 ### Readonly API keys
 
@@ -283,14 +308,50 @@ await clobClient.updateBalanceAllowance({
 
 `AssetType.CONDITIONAL` requires `token_id`. See `examples/getBalanceAllowance.ts` and `examples/updateBalanceAllowance.ts`.
 
+These helpers read and refresh CLOB-indexed balances and allowances. They do not submit on-chain approval transactions. Before trading, wallets typically need USDC approval and conditional-token operator approval for the exchange contracts returned by `getContractConfig(chainId)`:
+
+| Field | Purpose |
+| - | - |
+| `exchange` / `negRiskExchange` | Exchange contracts used when signing standard versus neg-risk orders |
+| `negRiskAdapter` | Adapter used by neg-risk flows |
+| `collateral` | USDC (6 decimals) |
+| `conditionalTokens` | Conditional token framework contract (6 decimals) |
+
+`getContractConfig` supports Polygon `137` and Amoy `80002` only; other chain IDs throw `Invalid network`. Use `examples/approveAllowances.ts` for standard markets and `examples/approveNegRiskAllowances.ts` for neg-risk markets, then call `updateBalanceAllowance` if the API still shows a stale allowance.
+
 ### Orders and operations
 
-- Use `createAndPostOrder` or `createOrder` plus `postOrder` for limit orders.
+- Use `createAndPostOrder` or `createOrder` plus `postOrder` for limit orders. Limit orders use `size` (shares) and require an explicit `price`.
 - Use `createAndPostMarketOrder` or `createMarketOrder` plus `postOrder` for market-style FOK/FAK orders. For market buys, `amount` is the USDC amount to spend; for market sells, `amount` is the share amount to sell.
+- Order types: `OrderType.GTC` and `OrderType.GTD` for limit orders; `OrderType.FOK` (fill entirely or cancel) and `OrderType.FAK` (fill available, cancel remainder) for market orders. Defaults are GTC for `createAndPostOrder` and FOK for `createAndPostMarketOrder`.
 - Use `postOrders([{ order, orderType, postOnly }], deferExec, defaultPostOnly)` to submit a batch. Per-order `postOnly` overrides `defaultPostOnly`; the same `deferExec` value is applied to every order in the payload.
-- `postOnly` is the fourth argument to `postOrder(order, OrderType.GTC, deferExec, postOnly)` and is supported for GTC/GTD orders. See `examples/postOnlyOrder.ts`.
+- `postOnly` is the fourth argument to `postOrder(order, OrderType.GTC, deferExec, postOnly)`. `createAndPostOrder` accepts the same flag as its fifth argument after `orderType` and `deferExec`. It is supported for GTC/GTD orders only; other types throw `postOnly is only supported for GTC and GTD orders`. See `examples/postOnlyOrder.ts`.
+- `deferExec` is included in the posted order payload for `postOrder`, `postOrders`, `createAndPostOrder`, and `createAndPostMarketOrder`. Defaults to `false`.
 - `postOrder` and `postOrders` use builder headers automatically when the client has builder auth available.
 - `postHeartbeat(heartbeatId)` keeps a heartbeat chain active. If heartbeats are started and one is not sent within 10 seconds, all orders are cancelled. Pass the previously returned `heartbeat_id` to continue the chain; omit the argument or pass `null` to start a new chain.
+
+#### Market metadata during order creation
+
+`createOrder` and `createMarketOrder` require L1 auth and resolve market metadata before signing:
+
+```ts
+const tickSize = await clobClient.getTickSize(tokenID);
+const negRisk = await clobClient.getNegRisk(tokenID);
+const feeRateBps = await clobClient.getFeeRateBps(tokenID);
+
+const order = await clobClient.createOrder(
+    { tokenID, price: 0.5, side: Side.BUY, size: 10 },
+    { tickSize, negRisk },
+);
+```
+
+- If `options.tickSize` is omitted, `getTickSize(tokenID)` supplies the market minimum. An explicit tick size must be equal to or larger than that minimum; smaller values throw `invalid tick size`.
+- `options.negRisk` defaults to `getNegRisk(tokenID)` and selects the standard exchange versus the neg-risk exchange contract when the order is signed.
+- `feeRateBps` on the user order is resolved against `getFeeRateBps(tokenID)`. When the market fee is greater than zero and the caller supplies a different value, order creation throws before signing. The signed order always uses the market fee rate.
+- Limit and market prices must fall in `[tickSize, 1 - tickSize]`; out-of-range prices throw `invalid price`.
+- Before signing, the order builder rounds price, size, and notional amounts using the tick-size rounding table (`price`/`size`/`amount` decimal places). Size is rounded down to 2 decimals for all supported ticks.
+
+If a market order omits `price`, `createMarketOrder` calls `calculateMarketPrice(tokenID, side, amount, orderType)` against the current book. Keep the `orderType` on the market-order payload aligned with the `createAndPostMarketOrder` / `postOrder` argument. Auto-pricing throws `no orderbook` or `no match` when the book is missing or too thin. See `examples/marketBuyOrder.ts` and `examples/marketSellOrder.ts`.
 
 ```ts
 let heartbeatId: string | null = null;
@@ -381,18 +442,25 @@ Dates are passed through to the API as strings; examples use UTC `YYYY-MM-DD` va
 ### Operational troubleshooting
 
 - For private helper failures, verify the client was constructed with `signer`, L2 `creds`, the correct `signatureType`, and the `funderAddress` that owns the funds or proxy account.
+- Client-side auth failures throw before the HTTP call: missing signer → `Signer is needed to interact with this endpoint!`; missing L2 creds → `API Credentials are needed to interact with this endpoint!`.
+- L1 and L2 headers default to `Math.floor(Date.now() / 1000)`. If the local clock drifts enough to fail authenticated requests, construct the client with `useServerTime: true` so header timestamps come from `getServerTime()`.
+- `getOk()` hits `GET {host}/` and `getServerTime()` hits `GET {host}/time`. A trailing slash on `host` is stripped in the constructor.
+- `geoBlockToken` is attached as the `geo_block_token` query parameter on GET, POST, PUT, and DELETE helpers, including RFQ requests that reuse those helpers.
 - For empty paginated reads, confirm that filters match the environment: `market` is a condition ID, while `asset_id` and `getPricesHistory({ market })` use token IDs.
 - For heartbeat cancellations, persist the returned `heartbeat_id` between loop iterations and send the next heartbeat before the 10 second window closes.
 - For cleanup scripts, prefer the narrowest helper that matches the runbook: `cancelOrder` for one hash, `cancelOrders` for known hashes, `cancelMarketOrders` for one market or token, and `cancelAll` only for global account cleanup.
 - For rewards checks, use L2 credentials for account-specific earnings and an unauthenticated client only for public rewards market configuration.
+- For allowance mismatches after on-chain approval, confirm `getContractConfig(chainId)` targets the same network as the wallet, then call `updateBalanceAllowance` for the asset.
 
-### Tick size cache
+### Tick size and market metadata cache
 
 `createOrder`, market-order helpers, and RFQ order creation resolve a market's tick size before rounding prices and sizes. Valid tick sizes are `"0.1"`, `"0.01"`, `"0.001"`, and `"0.0001"`.
 
 - The client caches tick sizes for 5 minutes by default; set constructor argument `tickSizeTtlMs` to change the TTL.
 - Passing `options.tickSize` skips using a smaller value than the market minimum; smaller tick sizes throw `invalid tick size`.
 - Call `clearTickSizeCache(tokenID)` to refresh one token or `clearTickSizeCache()` to clear all cached tick sizes.
+- `getOrderBook` and `getOrderBooks` also refresh the tick-size cache when the response includes `asset_id` and `tick_size`.
+- `getNegRisk` and `getFeeRateBps` cache per token for the life of the `ClobClient` instance (no TTL). Pass explicit `negRisk` or recreate the client when market rules change.
 
 ### Examples
 
@@ -402,12 +470,13 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 | - | - |
 | Getting started | `createOrDeriveApiKey.ts`, `getMarkets.ts`, `order.ts`, `orders.ts` |
 | Limit and market orders | `GTDOrder.ts`, `marketBuyOrder.ts`, `marketSellOrder.ts`, `postOnlyOrder.ts`, `matchOrders.ts` |
+| Allowances | `approveAllowances.ts`, `approveNegRiskAllowances.ts`, `getBalanceAllowance.ts`, `updateBalanceAllowance.ts` |
 | Order data | `getOrder.ts`, `getOpenOrders.ts`, `getOrderbook.ts`, `getOrderbooks.ts`, `getTrades.ts`, `getTradesPaginated.ts` |
 | RFQ | `rfqFullFlow.ts` and the `rfq*.ts` scripts |
 | Builder | `createBuilderApiKey.ts`, `getBuilderApiKeys.ts`, `revokeBuilderApiKeys.ts`, `getBuilderTrades.ts`, `getBuilderOpenOrders.ts` |
 | Readonly keys | `createReadonlyApiKey.ts`, `getReadonlyApiKeys.ts`, `deleteReadonlyApiKey.ts`, `getOpenOrdersWithReadonlyKey.ts` |
 | Operations | `postHeartbeat.ts`, `geoToken.ts`, `rewards.ts`, `getServerTime.ts`, `getPricesHistory.ts`, `cancelMarketOrders.ts` |
-| WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. |
+| WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. Connect to `{WS_URL}/ws/user` or `{WS_URL}/ws/market`. User channels send L2 `auth` plus condition IDs in `markets`; market channels subscribe with token IDs in `assets_ids`. |
 
 ### Error handling and retries
 
@@ -451,8 +520,10 @@ pnpm install
 pnpm lint
 pnpm test
 pnpm build
-pnpm ci
+pnpm run ci
 ```
+
+Invoke the package script as `pnpm run ci`. `pnpm ci` is a built-in pnpm command and does not run this repository's `ci` script.
 
 The package requires Node.js `>=20.10` and uses ESM with TypeScript `moduleResolution: "nodenext"`. Local source and test imports intentionally include `.ts` extensions; `rewriteRelativeImportExtensions` rewrites relative imports for the emitted `dist/` package during `pnpm build`.
 
@@ -461,5 +532,5 @@ When adding TypeScript files:
 - Use `import type` for type-only imports because `verbatimModuleSyntax` is enabled.
 - Keep runtime imports extension-qualified, matching the existing `../src/index.ts` and `./client.ts` style. Package consumers should continue importing from `@polymarket/clob-client`.
 - Put package code under `src/`; `pnpm build` compiles `src/` via `tsconfig.build.json`, while `pnpm typecheck` checks tests and their imported source through `tsconfig.test.json`.
-- Remember that `pnpm lint` currently checks `src/` only. Run `pnpm ci` before publishing or opening package changes.
-- Use `.env.example` as a starting point when running example scripts locally.
+- Remember that `pnpm lint` currently checks `src/` only. Run `pnpm run ci` before publishing or opening package changes.
+- Use `.env.example` as a starting point when running example scripts locally. Allowance examples also expect an `RPC_TOKEN` for the Polygon/Amoy JSON-RPC provider.
