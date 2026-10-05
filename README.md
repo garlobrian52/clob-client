@@ -301,6 +301,51 @@ heartbeatId = resp.heartbeat_id;
 
 Run heartbeat loops with a cadence below the 10 second cancellation window; `examples/postHeartbeat.ts` uses 5 seconds.
 
+### Signed order encoding
+
+`createOrder` and `createMarketOrder` return a `SignedOrder` before the order is posted. Prices and sizes are scaled to 6-decimal integer strings (`COLLATERAL_TOKEN_DECIMALS` and `CONDITIONAL_TOKEN_DECIMALS` are both `6`). One share and one USDC are both `"1000000"`.
+
+On a limit order, `size` is a share amount:
+
+- `BUY`: `makerAmount` is USDC (`size * price`) and `takerAmount` is shares.
+- `SELL`: `makerAmount` is shares and `takerAmount` is USDC.
+
+A buy at price `0.5` for `21.04` shares with tick size `0.01` signs `makerAmount` `"10520000"` and `takerAmount` `"21040000"`. The same inputs on the sell side swap those two amounts.
+
+On a market order, `amount` depends on side, and the signed `expiration` is always `"0"`:
+
+- `BUY`: `amount` is USDC to spend. Price `0.5` and amount `100` signs `makerAmount` `"100000000"` and `takerAmount` `"200000000"`.
+- `SELL`: `amount` is shares to sell. `makerAmount` is that share amount and `takerAmount` is USDC proceeds.
+- When `price` is omitted, `createMarketOrder` writes the `calculateMarketPrice` result onto the order before rounding. That helper defaults to `OrderType.FOK` when the market order omits `orderType`, even if `postOrder` is later called with `OrderType.FAK`.
+- `createOrder` and `createMarketOrder` also write the resolved market fee back onto `feeRateBps`.
+
+Rounding uses this table before the 6-decimal scale:
+
+| Tick size | Price decimals | Size decimals | Notional decimals |
+| - | - | - | - |
+| `0.1` | 1 | 2 | 3 |
+| `0.01` | 2 | 2 | 4 |
+| `0.001` | 3 | 2 | 5 |
+| `0.0001` | 4 | 2 | 6 |
+
+- Limit prices use `roundNormal`. Market prices use `roundDown`.
+- Limit `size` and market `amount` are rounded down to 2 decimals.
+- The notional is `size * price` for limit orders, `amount / price` for market buys, and `amount * price` for market sells. It is left unchanged when it already fits the notional decimals. Otherwise the builder rounds up to 4 extra decimals and, if the value still has too many places, rounds down to the notional decimals.
+
+Field defaults on the signed order:
+
+- `maker` is `funderAddress`. When that argument is omitted, `maker` is the signer address.
+- `signer` is the signer address. `ExchangeOrderBuilder` throws `signer does not match` when that address is not the address that produces the EIP-712 signature.
+- `taker` is the zero address when omitted, which marks a public order. Set `UserOrder.taker` to restrict the counterparty.
+- `nonce` is `"0"` when omitted or set to `0`.
+- Inside the order builder, `feeRateBps` is `"0"` when omitted or set to `0`. `ClobClient` order helpers replace it with the market fee first.
+- Limit `expiration` is Unix seconds from `UserOrder.expiration`, or `"0"` when omitted. `"0"` means the signed order has no expiry. `examples/GTDOrder.ts` sets the timestamp about 70 seconds ahead and posts with `OrderType.GTD`.
+- `salt` is `Math.round(Math.random() * Date.now())`, stored as a decimal string.
+
+The EIP-712 domain name is `Polymarket CTF Exchange`, version `1`, with the client `chainId` and `verifyingContract` set to `exchange` or `negRiskExchange` from `getContractConfig(chainId)`. In the signature, `side` is `0` for buy and `1` for sell. `signatureType` is `0` (EOA), `1` (proxy), or `2` (Gnosis Safe).
+
+`postOrder` does not send that object unchanged. `orderToJson` sets `owner` to the L2 API key (`creds.key`), converts `side` back to `"BUY"` or `"SELL"`, and sends `salt` as a number. `deferExec` defaults to `false`. `postOnly` defaults to `false` and is included in the JSON body; `true` is rejected unless the order type is GTC or GTD.
+
 ### Market data and private reads
 
 - Public market discovery helpers such as `getMarkets`, `getSimplifiedMarkets`, `getSamplingMarkets`, `getSamplingSimplifiedMarkets`, and `getMarket(conditionID)` do not require L2 credentials. The list helpers accept a `next_cursor` argument and default to the initial cursor.
@@ -398,6 +443,8 @@ Dates are passed through to the API as strings; examples use UTC `YYYY-MM-DD` va
 
 The `examples/` directory contains runnable scripts. Most examples load `.env` from the repository root.
 
+Unset `CHAIN_ID` defaults to `Chain.AMOY` (`80002`), and unset `CLOB_API_URL` defaults to `http://localhost:8080`. The quick start above uses Polygon `137` and `https://clob.polymarket.com`, so set both variables before running an example against production.
+
 | Category | Examples |
 | - | - |
 | Getting started | `createOrDeriveApiKey.ts`, `getMarkets.ts`, `order.ts`, `orders.ts` |
@@ -407,7 +454,7 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 | Builder | `createBuilderApiKey.ts`, `getBuilderApiKeys.ts`, `revokeBuilderApiKeys.ts`, `getBuilderTrades.ts`, `getBuilderOpenOrders.ts` |
 | Readonly keys | `createReadonlyApiKey.ts`, `getReadonlyApiKeys.ts`, `deleteReadonlyApiKey.ts`, `getOpenOrdersWithReadonlyKey.ts` |
 | Operations | `postHeartbeat.ts`, `geoToken.ts`, `rewards.ts`, `getServerTime.ts`, `getPricesHistory.ts`, `cancelMarketOrders.ts` |
-| WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. |
+| WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. It defaults `WS_URL` to `ws://localhost:8081`. |
 
 ### Error handling and retries
 
