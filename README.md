@@ -55,6 +55,8 @@ The client supports three authentication levels:
 - **L2:** a signer plus `ApiKeyCreds`. Required for private CLOB operations such as posting orders, RFQs, open orders, readonly keys, and heartbeats.
 - **Builder:** L2 auth plus a `BuilderConfig` from `@polymarket/builder-signing-sdk`. Used for builder-authenticated order posting and builder endpoints.
 
+Header names and signature payloads are in [L1 and L2 request headers](#l1-and-l2-request-headers).
+
 `signatureType` controls how orders are signed:
 
 ```ts
@@ -286,7 +288,7 @@ await clobClient.updateBalanceAllowance({
 ### Orders and operations
 
 - Use `createAndPostOrder` or `createOrder` plus `postOrder` for limit orders.
-- Use `createAndPostMarketOrder` or `createMarketOrder` plus `postOrder` for market-style FOK/FAK orders. For market buys, `amount` is the USDC amount to spend; for market sells, `amount` is the share amount to sell.
+- Use `createAndPostMarketOrder` or `createMarketOrder` plus `postOrder` for market-style FOK/FAK orders. For market buys, `amount` is the USDC amount to spend; for market sells, `amount` is the share amount to sell. See [Market price selection](#market-price-selection) when `price` is omitted.
 - Use `postOrders([{ order, orderType, postOnly }], deferExec, defaultPostOnly)` to submit a batch. Per-order `postOnly` overrides `defaultPostOnly`; the same `deferExec` value is applied to every order in the payload.
 - `postOnly` is the fourth argument to `postOrder(order, OrderType.GTC, deferExec, postOnly)` and is supported for GTC/GTD orders. See `examples/postOnlyOrder.ts`.
 - `postOrder` and `postOrders` use builder headers automatically when the client has builder auth available.
@@ -443,6 +445,92 @@ try {
 `throwOnError` checks the normalized response object returned by the client helpers. Responses with an `error` field become `ApiError`; successful responses are returned unchanged. Authentication and configuration failures, such as missing L1 or L2 credentials, still throw regular `Error` instances from the relevant client method.
 
 `retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a 30 ms delay for network errors, selected network error codes, and HTTP 5xx responses. GET, PUT, and DELETE helpers are not retried automatically.
+
+### L1 and L2 request headers
+
+`ClobClient` builds authenticated headers in `src/headers/index.ts`. `POLY_ADDRESS` is the constructor `signer` address, not `funderAddress`. The optional `getSigner` callback is not used for these headers.
+
+Timestamps are Unix seconds. Header values are decimal strings. With `useServerTime: true`, L1 and L2 calls take that timestamp from `getServerTime()` (`GET /time`) instead of the local clock.
+
+#### L1 headers
+
+`createApiKey` (`POST /auth/api-key`) and `deriveApiKey` (`GET /auth/derive-api-key`) send:
+
+| Header | Value |
+| - | - |
+| `POLY_ADDRESS` | Signer address |
+| `POLY_SIGNATURE` | EIP-712 signature of the `ClobAuth` payload |
+| `POLY_TIMESTAMP` | Unix seconds, as a decimal string |
+| `POLY_NONCE` | API-key nonce, as a decimal string. An omitted nonce becomes `"0"` |
+
+`buildClobEip712Signature` signs this typed data:
+
+- Domain name `ClobAuthDomain`, version `1`, and `chainId` set to the client chain ID.
+- Primary type `ClobAuth` with fields `address` (address), `timestamp` (string), `nonce` (uint256), and `message` (string).
+- `message` is `This message attests that I control the given wallet`.
+- `timestamp` in the payload is the same decimal string as `POLY_TIMESTAMP`.
+
+This L1 nonce selects which API key is created or derived. It is separate from `UserOrder.nonce`, the on-chain cancellation nonce stored on a signed order.
+
+`createOrDeriveApiKey(nonce)` posts a create request first. If the normalized response has no `key`, it calls `deriveApiKey` with the same nonce. `throwOnError: true` raises `ApiError` before that check, so a failed create does not fall through to derive.
+
+#### L2 headers
+
+Private REST calls send:
+
+| Header | Value |
+| - | - |
+| `POLY_ADDRESS` | Signer address |
+| `POLY_SIGNATURE` | HMAC-SHA256 of the canonical string, URL-safe base64 |
+| `POLY_TIMESTAMP` | Unix seconds, as a decimal string |
+| `POLY_API_KEY` | `creds.key` |
+| `POLY_PASSPHRASE` | `creds.passphrase` |
+
+The HMAC message concatenates the decimal timestamp, the HTTP method, and `requestPath` with no separator. `body` is appended only when it is not `undefined`.
+
+- `method` is `GET`, `POST`, `PUT`, or `DELETE`.
+- `requestPath` starts with `/` and does not include the host. Path parameters are included: `getOrder` signs `/data/order/` plus the order id. Query parameters, including `next_cursor`, filters, and `geo_block_token`, are not signed.
+- `body` is `JSON.stringify` of the payload for calls that send one, including `postOrder`, `postOrders`, cancels that include a body, heartbeats, and RFQ writes. GET helpers omit `body`.
+
+`creds.secret` is decoded as base64. `-` and `_` are read as `+` and `/`, and characters outside the base64 alphabet are removed. The signature replaces `+` with `-` and `/` with `_` and keeps `=` padding.
+
+`tests/signing/hmac.test.ts` checks one vector: secret `AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`, timestamp `1000000`, method `test-sign`, path `/orders`, and body `{"hash": "0x123"}` produce `ZwAdJKvoYRlEKDkNMwd5BuwNNtg93kNaR_oU2HrfVvc=`.
+
+When builder auth is valid and header generation succeeds, the client merges `POLY_BUILDER_API_KEY`, `POLY_BUILDER_TIMESTAMP`, `POLY_BUILDER_PASSPHRASE`, and `POLY_BUILDER_SIGNATURE` onto the L2 headers. Readonly keys do not use this HMAC. Send them as `POLY_READONLY_API_KEY` and `POLY_ADDRESS` on a direct HTTP request.
+
+On Node, the HTTP helper also sets `User-Agent` to `@polymarket/clob-client`, `Accept: */*`, `Connection: keep-alive`, and `Content-Type: application/json`, plus `Accept-Encoding: gzip` on GET. In the browser those extra headers are left unset.
+
+Calls fail in the client before a request is sent in these cases:
+
+- Missing `signer`: `Signer is needed to interact with this endpoint!`
+- Missing L2 `creds`: `API Credentials are needed to interact with this endpoint!`
+- A builder-only method without a valid `BuilderConfig`: `Builder API Credentials needed to interact with this endpoint!`
+- Builder header generation returned nothing for a required builder call: `Builder key auth failed!`
+
+`src/signing/constants.ts` exports `CLOB_DOMAIN` and `CLOB_TYPES`, but `buildClobEip712Signature` does not use them. `CLOB_DOMAIN` hardcodes chain ID `1`, and `CLOB_TYPES` omits `nonce`. Match the payload in `src/signing/eip712.ts`.
+
+Auth checks:
+
+- Derive with the same nonce used at creation. A different nonce produces a different L1 signature.
+- Sign the same timestamp the header sends. Clock skew is the reason to set `useServerTime`.
+- Rebuild the HMAC from the path and `JSON.stringify` body the client sends. Adding the host, the query string, or a re-serialized body changes the signature.
+- Put the proxy or funder address on the order `maker` field. `POLY_ADDRESS` stays the signer.
+
+### Market price selection
+
+`calculateMarketPrice(tokenID, side, amount, orderType = OrderType.FOK)` reads `getOrderBook(tokenID)` and returns the price level that covers `amount`.
+
+- A falsy book throws `no orderbook`.
+- Buys walk `book.asks`. Sells walk `book.bids`. A missing side throws `no match`.
+- The walk starts at the last level and moves toward index `0`. The helper examples order asks as `0.6`, `0.55`, `0.5` and bids as `0.4`, `0.45`, `0.5`, so the best price in those examples is last.
+- Buys accumulate `size * price` (USDC) and compare it with `amount`. Sells accumulate `size` (shares). The returned price is the level where the running sum first reaches `amount`.
+- An empty side throws `no match`. If the running sum never reaches `amount`, `OrderType.FOK` throws `no match`. Any other `orderType`, including `FAK`, returns the price at index `0`.
+
+On the example ask ladder, a buy amount of `150` returns `0.6`: `$50` at `0.5`, then `$55` at `0.55` (running `$105`), then the `0.6` level. A buy amount of `200` is more than the `$165` on that ladder, so FOK throws `no match` and FAK returns `0.6`.
+
+`createMarketOrder` calls this helper when `price` is omitted and passes through `orderType`. An omitted `orderType` is FOK inside `calculateMarketPrice`. Set `orderType: OrderType.FAK` on the market order when a thin book should price at index `0` instead of throwing. Post the order with that same type; the helper only chooses the price.
+
+An error payload such as `{ error, status }` is truthy and has no `asks` or `bids`, so this path throws `no match` unless `throwOnError` already raised `ApiError` from `getOrderBook`.
 
 ### Development
 
