@@ -289,6 +289,7 @@ await clobClient.updateBalanceAllowance({
 - Use `createAndPostMarketOrder` or `createMarketOrder` plus `postOrder` for market-style FOK/FAK orders. For market buys, `amount` is the USDC amount to spend; for market sells, `amount` is the share amount to sell.
 - Use `postOrders([{ order, orderType, postOnly }], deferExec, defaultPostOnly)` to submit a batch. Per-order `postOnly` overrides `defaultPostOnly`; the same `deferExec` value is applied to every order in the payload.
 - `postOnly` is the fourth argument to `postOrder(order, OrderType.GTC, deferExec, postOnly)` and is supported for GTC/GTD orders. See `examples/postOnlyOrder.ts`.
+- `OrderType.GTD` is still a limit order. `createOrder` signs `expiration` as the decimal string of `userOrder.expiration`. Omitted or `0` becomes `"0"`. This client does not add time. `examples/GTDOrder.ts` adds 10 seconds in the caller (`60 * 1000 + 10 * 1000`) because of an example comment that the CLOB cancels orders inside a 10 second security threshold. Apply that pad in your own GTD callers when you want the same buffer.
 - `postOrder` and `postOrders` use builder headers automatically when the client has builder auth available.
 - `postHeartbeat(heartbeatId)` keeps a heartbeat chain active. If heartbeats are started and one is not sent within 10 seconds, all orders are cancelled. Pass the previously returned `heartbeat_id` to continue the chain; omit the argument or pass `null` to start a new chain.
 
@@ -383,6 +384,7 @@ Dates are passed through to the API as strings; examples use UTC `YYYY-MM-DD` va
 - For private helper failures, verify the client was constructed with `signer`, L2 `creds`, the correct `signatureType`, and the `funderAddress` that owns the funds or proxy account.
 - For empty paginated reads, confirm that filters match the environment: `market` is a condition ID, while `asset_id` and `getPricesHistory({ market })` use token IDs.
 - For heartbeat cancellations, persist the returned `heartbeat_id` between loop iterations and send the next heartbeat before the 10 second window closes.
+- For GTD orders that disappear immediately, set `expiration` in the caller. The client copies that number into the signed order and does not apply the 10 second pad from `examples/GTDOrder.ts`.
 - For cleanup scripts, prefer the narrowest helper that matches the runbook: `cancelOrder` for one hash, `cancelOrders` for known hashes, `cancelMarketOrders` for one market or token, and `cancelAll` only for global account cleanup.
 - For rewards checks, use L2 credentials for account-specific earnings and an unauthenticated client only for public rewards market configuration.
 
@@ -393,6 +395,20 @@ Dates are passed through to the API as strings; examples use UTC `YYYY-MM-DD` va
 - The client caches tick sizes for 5 minutes by default; set constructor argument `tickSizeTtlMs` to change the TTL.
 - Passing `options.tickSize` skips using a smaller value than the market minimum; smaller tick sizes throw `invalid tick size`.
 - Call `clearTickSizeCache(tokenID)` to refresh one token or `clearTickSizeCache()` to clear all cached tick sizes.
+
+### Order book hash
+
+`getOrderBook` and `getOrderBooks` return the API payload. They refresh the tick-size cache from `asset_id` and `tick_size`, and they leave `hash` as the server sent it.
+
+`getOrderBookHash(orderbook)` is the public wrapper. It calls `generateOrderBookSummaryHash` in `src/utilities.ts`, which is not a package export. The helper uses `crypto.subtle.digest("SHA-1", ...)` and returns a hex string. It also mutates the object you pass in:
+
+1. Sets `orderbook.hash` to `""`.
+2. Hashes `JSON.stringify(orderbook)`.
+3. Writes that digest back onto `orderbook.hash`.
+
+Every enumerable field and the key order are part of the digest. A value already stored in `hash` is cleared first, so it does not change the result. Two books with the same bids and asks still hash differently when other fields differ. Hashing the same object twice, with no other field changes, returns the same digest.
+
+`tests/utilities.test.ts` records one vector. A book with market `0xaabbcc`, asset id `100`, timestamp `123456789`, bids at `0.3` and `0.4`, asks at `0.6` and `0.7`, `min_order_size` `15`, tick size `0.001`, `neg_risk` false, and `hash` `""` digests to `36f56998e26d9a7c553446f35b240481efb271a3`. Await the promise; `getOrderBookHash` returns the async digest directly.
 
 ### Examples
 
@@ -407,7 +423,20 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 | Builder | `createBuilderApiKey.ts`, `getBuilderApiKeys.ts`, `revokeBuilderApiKeys.ts`, `getBuilderTrades.ts`, `getBuilderOpenOrders.ts` |
 | Readonly keys | `createReadonlyApiKey.ts`, `getReadonlyApiKeys.ts`, `deleteReadonlyApiKey.ts`, `getOpenOrdersWithReadonlyKey.ts` |
 | Operations | `postHeartbeat.ts`, `geoToken.ts`, `rewards.ts`, `getServerTime.ts`, `getPricesHistory.ts`, `cancelMarketOrders.ts` |
-| WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. |
+| WebSocket | `socketConnection.ts` uses the `ws` dev dependency and is an example script, not a package export. See below. |
+
+### WebSocket example
+
+`examples/socketConnection.ts` opens `${process.env.WS_URL || "ws://localhost:8081"}/ws/${type}`. `type` is `market` or `user`. The script calls `main("market")`, so the user channel stays unused until that call changes.
+
+The subscribe payload is JSON:
+
+- `type` matches the path segment.
+- Market mode sets `assets_ids` to token IDs and leaves `auth` unset.
+- User mode sets `markets` to condition IDs and sets `auth` to `{ apiKey, secret, passphrase }` from `CLOB_API_KEY`, `CLOB_SECRET`, and `CLOB_PASS_PHRASE`.
+- `initial_dump` is `true`.
+
+After `open`, the script sends the payload, then sends the plain string `PING` every 50 seconds (`50000` ms). The `error` and `close` handlers log and exit the process with code 1. This script does not use `ClobClient`.
 
 ### Error handling and retries
 
@@ -442,7 +471,15 @@ try {
 
 `throwOnError` checks the normalized response object returned by the client helpers. Responses with an `error` field become `ApiError`; successful responses are returned unchanged. Authentication and configuration failures, such as missing L1 or L2 credentials, still throw regular `Error` instances from the relevant client method.
 
-`retryOnError` is the eleventh constructor argument and applies to POST requests made through `ClobClient`. When enabled, the HTTP helper makes one additional POST attempt after a 30 ms delay for network errors, selected network error codes, and HTTP 5xx responses. GET, PUT, and DELETE helpers are not retried automatically.
+`retryOnError` is the eleventh constructor argument. `ClobClient` passes it only into the POST helper in `src/http-helpers/index.ts`. GET, PUT, and DELETE are not retried.
+
+When the flag is set, a POST is retried once after a 30 ms delay, and only for an Axios error that `isTransientAxiosError` accepts:
+
+- the error has no HTTP response (network failure), or
+- the status is 500–599, or
+- `error.code` is `ECONNABORTED`, `ENETUNREACH`, `EAI_AGAIN`, or `ETIMEDOUT`.
+
+Other Axios failures, including typical 4xx responses, return immediately. Exceptions that are not Axios errors are not retried. The second attempt uses the same normalizer, so a repeated failure is still `{ error, status? }` unless `throwOnError` turns that object into `ApiError`.
 
 ### Development
 
