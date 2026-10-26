@@ -181,16 +181,62 @@ RFQ method guide:
 - Requester methods: `createRfqRequest`, `getRfqRequests`, `getRfqRequesterQuotes`, `getRfqBestQuote`, `acceptRfqQuote`, and `cancelRfqRequest`.
 - Quoter methods: `createRfqQuote`, `getRfqQuoterQuotes`, `approveRfqOrder`, and `cancelRfqQuote`.
 - Shared utility: `rfqConfig` returns server RFQ configuration.
-- `acceptRfqQuote` and `approveRfqOrder` fetch quote details, create signed orders internally, and use the supplied `expiration` as the signed order expiration.
-- For complementary matches, requester and quoter orders use opposite sides. For mint/merge matches, the requester order uses the complement token and inverse price.
+- `acceptRfqQuote` and `approveRfqOrder` fetch one quote, rebuild a signed order, and use the supplied `expiration` as that order's expiration. Amount encoding and the posted JSON shape are below.
+
+RFQ amount encoding:
+
+`createRfqRequest` posts to `/rfq/request` and `createRfqQuote` posts to `/rfq/quote`. The body fields are `assetIn`, `assetOut`, `amountIn`, `amountOut`, and `userType` (quotes also include `requestId`). The client resolves the market tick size, rounds, and sends 6-decimal integer strings. `userType` is the constructor `signatureType`, copied when the client is created. Omitting `signatureType` sends `0` (`SignatureType.EOA`). In these payloads, asset `"0"` is the USDC sentinel.
+
+Requests and quotes use the same side mapping. Price uses `roundNormal` to the tick's price decimals. Size uses `roundDown` to 2 decimals. The notional stops at `(roundedSize * roundedPrice).toFixed(amountDecimals)`. Both legs are then scaled by `10^6`.
+
+| Side | `assetIn` | `amountIn` | `assetOut` | `amountOut` |
+| - | - | - | - | - |
+| BUY | token ID | size × 10^6 | `"0"` | notional × 10^6 |
+| SELL | `"0"` | notional × 10^6 | token ID | size × 10^6 |
+
+Tick size `"0.01"` uses 2 price decimals, 2 size decimals, and 4 notional decimals. A BUY of size `40` at price `0.5` posts:
+
+```ts
+{
+    assetIn: tokenID,
+    assetOut: "0",
+    amountIn: "40000000", // 40.00 shares
+    amountOut: "20000000", // 20.0000 USDC
+    userType: 0,
+}
+```
+
+`createRfqQuote` adds `requestId` to that object. Create calls skip `priceValid`. A caller tick size smaller than the market minimum still throws `invalid tick size (...)`.
+
+`cancelRfqRequest({ requestId })` sends `DELETE /rfq/request`. `cancelRfqQuote({ quoteId })` sends `DELETE /rfq/quote`. Both bodies are those objects.
+
+`acceptRfqQuote` loads the quote with `getRfqRequesterQuotes({ quoteIds: [quoteId] })`. `approveRfqOrder` loads it with `getRfqQuoterQuotes({ quoteIds: [quoteId] })`. A response that contains `error` throws `Error fetching RFQ quote: …`. An empty `data` array throws `RFQ quote not found`. With `throwOnError: true`, that GET fails as `ApiError` before those checks.
+
+Both helpers then call `createOrder`, so fee resolution, neg-risk selection, limit-order rounding, and `priceValid` apply to the derived order. The accept and approve POST bodies spread that signed order, then overwrite:
+
+- `expiration` with `Number.parseInt(order.expiration, 10)`
+- `salt` with `Number.parseInt(order.salt, 10)`
+- `side` with `"BUY"` or `"SELL"`
+- `owner` with the L2 API key
+
+`requestId` and `quoteId` sit beside those order fields. Accept posts the flat body to `/rfq/request/accept`. Approve posts it to `/rfq/quote/approve`. The EIP-712 signature still covers numeric side `0`/`1`, the string salt, and the string expiration.
+
+| Match | Requester order (`acceptRfqQuote`) | Quoter order (`approveRfqOrder`) |
+| - | - | - |
+| `COMPLEMENTARY` | Opposite the quote side, `quote.token`, `quote.price`. Size is `sizeOut` when the requester buys and `sizeIn` when the requester sells. | Quote side, `quote.token`, `quote.price`. Size is `sizeIn` for BUY and `sizeOut` for SELL. |
+| `MINT` or `MERGE` | Same side as the quote, `quote.complement`, price `1 - quote.price`. Size is `sizeIn` for BUY and `sizeOut` for SELL. | Same as the complementary quoter row. `approveRfqOrder` does not branch on match type. |
+| any other value | Throws `invalid match type`. | Unchanged. |
+
+The mint/merge inverse is passed into `createOrder` before limit-order rounding, so it can move onto the tick grid or throw `invalid price (...)` when it falls outside `[tick, 1 - tick]`.
 
 RFQ list filters:
 
 - `getRfqRequests`, `getRfqRequesterQuotes`, and `getRfqQuoterQuotes` accept `offset`, `limit`, `state`, market, size, USDC size, price, and sort filters.
 - `offset` is a base64 cursor; the default is `MA==`. `limit` defaults to 50 and is capped at 100.
 - `state` is `active` or `inactive`. If omitted, no state filter is applied.
-- Array filters such as `requestIds`, `quoteIds`, and `markets` are sent as repeated query parameters. Market filters must be condition IDs formatted as `0x` plus 64 hex characters.
-- Request sorting supports `price`, `expiry`, `size`, or `created`; quote sorting supports `price`, `expiry`, or `created`.
+- Array filters such as `requestIds`, `quoteIds`, and `markets` are sent as repeated query parameters (`markets=0x…&markets=0x…`). Market filters must be condition IDs formatted as `0x` plus 64 hex characters. `parseRfqRequestsParams` and `parseRfqQuotesParams` in `src/http-helpers/index.ts` comma-join those arrays, but `RfqClient` does not call them.
+- `getRfqBestQuote({ requestId })` sends `requestId` as a query parameter on `GET /rfq/data/best-quote`. Its only parameter is `requestId`.
+- Request sorting supports `price`, `expiry`, `size`, or `created`; quote sorting supports `price`, `expiry`, or `created`. L2 headers for these list GETs sign the path: `/rfq/data/requests`, `/rfq/data/requester/quotes`, or `/rfq/data/quoter/quotes`.
 
 RFQ troubleshooting checks:
 
