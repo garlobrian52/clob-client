@@ -330,32 +330,41 @@ Trade filters include `id`, `maker_address`, `market`, `asset_id`, `before`, and
 
 ### Notifications and order operations
 
-Notification helpers require L2 auth. `getNotifications()` includes the client's signature type in the request. `dropNotifications({ ids })` clears one or more notifications; IDs are sent as a comma-separated query parameter.
+Notification helpers require L2 auth.
+
+- `getNotifications()` is `GET /notifications`. The query includes `signature_type` from the client constructor. An omitted `signatureType` is `0` (`SignatureType.EOA`).
+- `dropNotifications({ ids })` is `DELETE /notifications`. `parseDropNotificationParams` joins `ids` into one `ids` query value. `{ ids: ["0", "1", "2"] }` becomes the value `0,1,2`, and the HTTP client percent-encodes the commas (`ids=0%2C1%2C2`). The L2 signature covers the path `/notifications`.
 
 ```ts
 const notifications = await clobClient.getNotifications();
 await clobClient.dropNotifications({ ids: ["3"] });
 ```
 
-Scoring and cleanup helpers also require L2 auth:
+Scoring helpers also require L2 auth. The single-order and batch calls use different HTTP shapes.
 
-- `isOrderScoring({ order_id })` checks one order.
-- `areOrdersScoring({ orderIds })` checks many order hashes and returns a map keyed by order ID.
-- `cancelMarketOrders({ market })` cancels orders for a condition ID.
-- `cancelMarketOrders({ asset_id })` cancels orders for a token ID.
+- `isOrderScoring({ order_id })` is `GET /order-scoring`. The argument is sent as the `order_id` query parameter. With no geo-block token, `{ order_id: "0x0" }` requests `/order-scoring?order_id=0x0`. The L2 message concatenates the timestamp, `GET`, and `/order-scoring`. The typed result is `{ scoring: boolean }`.
+- `areOrdersScoring({ orderIds })` is `POST /orders-scoring`. The body is `JSON.stringify(params?.orderIds)`. `{ orderIds: ["0x0", "0x1"] }` sends `["0x0","0x1"]`, and the L2 message concatenates the timestamp, `POST`, `/orders-scoring`, and that body string. The typed result is a map of string to boolean. The client returns the parsed JSON object with its keys unchanged.
+- Omitting `orderIds` makes `JSON.stringify` return `undefined`. The HMAC message then has no body, and the POST is sent without a JSON body.
+- `parseOrdersScoringParams({ orderIds: ["0x0", "0x1", "0x2"] })` returns `{ order_ids: "0x0,0x1,0x2" }`. That helper is covered by `tests/http-helpers/index.test.ts`. `areOrdersScoring` leaves it unused, and `src/index.ts` does not export it.
+- `areOrdersScoring` goes through `ClobClient.post`, so constructor `retryOnError` can retry that call. `isOrderScoring` uses the GET helper, which performs a single attempt.
 
 ```ts
 const single = await clobClient.isOrderScoring({ order_id: orderID });
-const many = await clobClient.areOrdersScoring({ orderIds: [orderID] });
+const many = await clobClient.areOrdersScoring({ orderIds: [orderID, otherOrderID] });
 
 if (!single.scoring && many[orderID] === false) {
     await clobClient.cancelMarketOrders({ market: conditionID });
 }
 ```
 
-Use `cancelMarketOrders` for scoped cleanup by condition ID or token ID. Use `cancelOrder`, `cancelOrders`, or `cancelAll` when the operational action is tied to explicit order IDs or all open orders.
+Cancel helpers are L2 `DELETE`s. The JSON signed for L2 is the JSON body on the wire:
 
-See `examples/getNofications.ts`, `examples/dropNofications.ts`, `examples/isOrderScoring.ts`, `examples/areOrdersScoring.ts`, and `examples/cancelMarketOrders.ts`.
+- `cancelOrder({ orderID })` calls `DELETE /order`. `{ orderID: "0x0" }` signs and sends `{"orderID":"0x0"}`.
+- `cancelOrders(["0x0"])` calls `DELETE /orders` with the JSON array `["0x0"]`.
+- `cancelMarketOrders({ market })` and `cancelMarketOrders({ asset_id })` call `DELETE /cancel-market-orders` with that object. `market` is a condition ID. `asset_id` is a token ID.
+- `cancelAll()` calls `DELETE /cancel-all` with no body.
+
+See `examples/getNofications.ts`, `examples/dropNofications.ts`, `examples/isOrderScoring.ts`, `examples/areOrdersScoring.ts`, `examples/cancelOrder.ts`, `examples/cancelOrders.ts`, `examples/cancelAll.ts`, and `examples/cancelMarketOrders.ts`.
 
 ### Rewards helpers
 
@@ -383,7 +392,8 @@ Dates are passed through to the API as strings; examples use UTC `YYYY-MM-DD` va
 - For private helper failures, verify the client was constructed with `signer`, L2 `creds`, the correct `signatureType`, and the `funderAddress` that owns the funds or proxy account.
 - For empty paginated reads, confirm that filters match the environment: `market` is a condition ID, while `asset_id` and `getPricesHistory({ market })` use token IDs.
 - For heartbeat cancellations, persist the returned `heartbeat_id` between loop iterations and send the next heartbeat before the 10 second window closes.
-- For cleanup scripts, prefer the narrowest helper that matches the runbook: `cancelOrder` for one hash, `cancelOrders` for known hashes, `cancelMarketOrders` for one market or token, and `cancelAll` only for global account cleanup.
+- For scoring checks, pass `order_id` to `isOrderScoring` and `orderIds` to `areOrdersScoring`. The batch call posts the JSON array from `JSON.stringify(orderIds)`.
+- For cleanup scripts, match the payload to the helper: `cancelOrder({ orderID })` for one id, `cancelOrders` with a string array, `cancelMarketOrders` for one condition ID or token ID, and `cancelAll` for every open order on the account.
 - For rewards checks, use L2 credentials for account-specific earnings and an unauthenticated client only for public rewards market configuration.
 
 ### Tick size cache
