@@ -258,6 +258,15 @@ await axios.get(`${host}/data/orders`, {
 });
 ```
 
+`createReadonlyApiKey`, `getReadonlyApiKeys`, and `deleteReadonlyApiKey` call `canL2Auth()` and send L2 headers. `validateReadonlyApiKey(address, key)` does not. It ignores the client signer, L2 creds, and `funderAddress`, and sends no `POLY_*` headers.
+
+```ts
+const client = new ClobClient(host, 137);
+const result = await client.validateReadonlyApiKey(address, readonlyKey.apiKey);
+```
+
+The call is `GET /auth/validate-readonly-api-key` with query parameters `address` and `key`. Pass the `apiKey` string from `createReadonlyApiKey()`, not the response object. That `key` query value is separate from the `POLY_READONLY_API_KEY` header used for private reads. The method is typed as `Promise<string>` and returns the response body unchanged. With the default `throwOnError: false`, a failed response is `{ error, status }` instead of a thrown `ApiError`.
+
 See `examples/createReadonlyApiKey.ts`, `examples/getReadonlyApiKeys.ts`, `examples/deleteReadonlyApiKey.ts`, and `examples/getOpenOrdersWithReadonlyKey.ts`.
 
 ### Balances and allowances
@@ -281,7 +290,24 @@ await clobClient.updateBalanceAllowance({
 });
 ```
 
-`AssetType.CONDITIONAL` requires `token_id`. See `examples/getBalanceAllowance.ts` and `examples/updateBalanceAllowance.ts`.
+Both helpers require a signer and L2 creds. A missing signer throws `Signer is needed to interact with this endpoint!`. Missing creds throw `API Credentials are needed to interact with this endpoint!`. Each helper is a GET, and `retryOnError` does not retry it.
+
+| Helper | Request |
+| - | - |
+| `getBalanceAllowance` | `GET /balance-allowance` |
+| `updateBalanceAllowance` | `GET /balance-allowance/update` |
+
+The query is the same on both paths:
+
+- `asset_type` is `COLLATERAL` or `CONDITIONAL`.
+- `token_id` is sent only when the caller sets it. Conditional examples pass the outcome token ID. The client does not reject a missing `token_id`.
+- `signature_type` is always the constructor signature type: `0` (EOA), `1` (proxy), or `2` (Gnosis Safe). An omitted `signatureType` is `0`. The client writes this value after copying caller params.
+
+A collateral read on the default EOA client, with no geo token, is `GET /balance-allowance?asset_type=COLLATERAL&signature_type=0`. The matching refresh is `GET /balance-allowance/update?asset_type=COLLATERAL&signature_type=0`. The L2 HMAC message is the timestamp, `GET`, and that path concatenated with no separators. The query string is omitted.
+
+`getBalanceAllowance` is typed as `{ balance: string, allowance: string }` and returns the response body unchanged. `updateBalanceAllowance` is typed as `Promise<void>` but still returns that raw GET body at runtime, so do not depend on a typed update payload. Neither helper pages results, and neither submits an on-chain approval. Token approvals stay in `examples/approveAllowances.ts` and `examples/approveNegRiskAllowances.ts`.
+
+See `examples/getBalanceAllowance.ts` and `examples/updateBalanceAllowance.ts`.
 
 ### Orders and operations
 
@@ -306,7 +332,12 @@ Run heartbeat loops with a cadence below the 10 second cancellation window; `exa
 - Public market discovery helpers such as `getMarkets`, `getSimplifiedMarkets`, `getSamplingMarkets`, `getSamplingSimplifiedMarkets`, and `getMarket(conditionID)` do not require L2 credentials. The list helpers accept a `next_cursor` argument and default to the initial cursor.
 - Public market data helpers such as `getOrderBook`, `getOrderBooks`, `getPrice`, `getPrices`, `getMidpoint`, `getMidpoints`, `getSpread`, `getSpreads`, `getLastTradePrice`, and `getLastTradesPrices` do not require L2 credentials.
 - `getPricesHistory({ market, startTs, endTs, fidelity, interval })` is also public and returns price points as `{ t, p }`. `market` is the token ID, timestamps are Unix seconds, and `PriceHistoryInterval` supports `max`, `1w`, `1d`, `6h`, and `1h`.
-- `getMarketTradesEvents(conditionID)` returns live activity events for a condition ID.
+- `getMarketTradesEvents(conditionID)` is an unauthenticated `GET /live-activity/events/{conditionID}`. The condition ID is appended to the path as given. The client does not encode it, validate a `0x` plus 64-hex shape, or page the result. With no geo token the request has no query string. `examples/getMarketTradesEvents.ts` uses `new ClobClient(host, chainId)`. Each `MarketTradeEvent` is returned unchanged:
+  - `event_type`
+  - `market`: `condition_id`, `asset_id`, `question`, `icon`, `slug`
+  - `user`: `address`, `username`, `profile_picture`, `optimized_profile_picture`, `pseudonym`
+  - `side` (`BUY` or `SELL`), `size`, `fee_rate_bps`, `price`, `outcome`, `transaction_hash`, and `timestamp` (strings)
+  - `outcome_index` (number)
 - `getTrades` and `getOpenOrders` require L2 auth and auto-page by default until the API returns the end cursor. Pass `only_first_page = true` to fetch only one page.
 - `getTradesPaginated(params, next_cursor)` returns one page as `{ trades, next_cursor, limit, count }`.
 - Pagination starts at cursor `MA==` and ends at cursor `LTE=`.
@@ -385,6 +416,9 @@ Dates are passed through to the API as strings; examples use UTC `YYYY-MM-DD` va
 - For heartbeat cancellations, persist the returned `heartbeat_id` between loop iterations and send the next heartbeat before the 10 second window closes.
 - For cleanup scripts, prefer the narrowest helper that matches the runbook: `cancelOrder` for one hash, `cancelOrders` for known hashes, `cancelMarketOrders` for one market or token, and `cancelAll` only for global account cleanup.
 - For rewards checks, use L2 credentials for account-specific earnings and an unauthenticated client only for public rewards market configuration.
+- For a balance refresh, call `updateBalanceAllowance`. It is a GET to `/balance-allowance/update` with the same query as the read, and it does not broadcast an approval transaction.
+- For a readonly-key check, call `validateReadonlyApiKey(address, apiKey)` on any client. Do not send that key as `POLY_READONLY_API_KEY` on the validate request.
+- For public trade activity, pass the condition ID to `getMarketTradesEvents`. It is a path segment on `/live-activity/events/`, not a `market` query filter.
 
 ### Tick size cache
 
@@ -402,7 +436,8 @@ The `examples/` directory contains runnable scripts. Most examples load `.env` f
 | - | - |
 | Getting started | `createOrDeriveApiKey.ts`, `getMarkets.ts`, `order.ts`, `orders.ts` |
 | Limit and market orders | `GTDOrder.ts`, `marketBuyOrder.ts`, `marketSellOrder.ts`, `postOnlyOrder.ts`, `matchOrders.ts` |
-| Order data | `getOrder.ts`, `getOpenOrders.ts`, `getOrderbook.ts`, `getOrderbooks.ts`, `getTrades.ts`, `getTradesPaginated.ts` |
+| Order data | `getOrder.ts`, `getOpenOrders.ts`, `getOrderbook.ts`, `getOrderbooks.ts`, `getTrades.ts`, `getTradesPaginated.ts`, `getMarketTradesEvents.ts` |
+| Balances | `getBalanceAllowance.ts`, `updateBalanceAllowance.ts`, `approveAllowances.ts`, `approveNegRiskAllowances.ts` |
 | RFQ | `rfqFullFlow.ts` and the `rfq*.ts` scripts |
 | Builder | `createBuilderApiKey.ts`, `getBuilderApiKeys.ts`, `revokeBuilderApiKeys.ts`, `getBuilderTrades.ts`, `getBuilderOpenOrders.ts` |
 | Readonly keys | `createReadonlyApiKey.ts`, `getReadonlyApiKeys.ts`, `deleteReadonlyApiKey.ts`, `getOpenOrdersWithReadonlyKey.ts` |
